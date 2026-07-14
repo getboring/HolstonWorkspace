@@ -1,0 +1,45 @@
+{
+  "name": "holston-workspace",
+  "description": "Cloud-native AI agent harness on Cloudflare Agents SDK (Think)",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "scripts": {
+    "start": "vite dev",
+    "build": "vite build",
+    "deploy": "vite build && wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  },
+  "dependencies": {
+    "@chat-adapter/telegram": "^4.31.0",
+    "@cloudflare/kumo": "^2.6.0",
+    "@cloudflare/think": "^0.13.0",
+    "@cloudflare/voice": "^0.3.4",
+    "@phosphor-icons/react": "^2.1.10",
+    "@streamdown/code": "^1.1.1",
+    "agents": "^0.17.4",
+    "ai": "^6.0.202",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "streamdown": "^2.5.0",
+    "workers-ai-provider": "^3.3.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@ai-sdk/react": "3.0.227",
+    "@babel/core": "8.0.1",
+    "@cloudflare/vite-plugin": "^1.42.3",
+    "@cloudflare/workers-types": "^5.20260708.1",
+    "@tailwindcss/vite": "^4",
+    "@types/node": "^26.0.1",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
+    "jose": "6.2.3",
+    "tailwindcss": "^4.3.2",
+    "typescript": "^6.0.3",
+    "vite": "^8.1.0",
+    "wrangler": "^4.110.0"
+  }
+}

@@ -1,0 +1,137 @@
+@import "tailwindcss";
+
+:root {
+  --holston-chat-max-width: 768px;
+  --holston-sidebar-width: 260px;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  font-family: system-ui, -apple-system, sans-serif;
+  background: #ffffff;
+  color: #1a1a1a;
+}
+
+.holston-app {
+  display: grid;
+  grid-template-columns: var(--holston-sidebar-width) 1fr;
+  grid-template-rows: 1fr;
+  height: 100vh;
+}
+
+.holston-sidebar {
+  border-right: 1px solid #e0e0e0;
+  overflow-y: auto;
+  background: #f9f9f9;
+}
+
+.holston-main {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.holston-tab-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.holston-tab {
+  padding: 0.5rem 1rem;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 0.875rem;
+  border-radius: 0.375rem;
+  color: #666;
+}
+
+.holston-tab:hover {
+  background: #f0f0f0;
+}
+
+.holston-tab-active {
+  background: #e6f0ff;
+  color: #1a1a1a;
+  font-weight: 500;
+}
+
+.holston-chat {
+  flex: 1;
+  overflow-y: auto;
+  max-width: var(--holston-chat-max-width);
+  margin: 0 auto;
+  width: 100%;
+  padding: 1rem;
+}
+
+.holston-composer {
+  border-top: 1px solid #e0e0e0;
+  padding: 1rem;
+  max-width: var(--holston-chat-max-width);
+  margin: 0 auto;
+  width: 100%;
+}
+
+.holston-message {
+  padding: 0.5rem 0;
+}
+
+.holston-message-user {
+  text-align: right;
+}
+
+.holston-message-assistant {
+  text-align: left;
+}
+
+.holston-powered-by {
+  text-align: center;
+  font-size: 0.75rem;
+  color: #888;
+  padding: 0.5rem;
+}
+
+.holston-powered-by a {
+  color: inherit;
+  text-decoration: underline;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+  }
+
+  html, body, #root {
+    background: #0a0a0a;
+    color: #e0e0e0;
+  }
+
+  .holston-sidebar {
+    border-right-color: #333;
+    background: #141414;
+  }
+
+  .holston-tab-bar {
+    border-bottom-color: #333;
+  }
+
+  .holston-tab:hover {
+    background: #1a1a1a;
+  }
+
+  .holston-tab-active {
+    background: #1a3050;
+    color: #fff;
+  }
+
+  .holston-composer {
+    border-top-color: #333;
+  }
+}

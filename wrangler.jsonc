@@ -1,0 +1,48 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "compatibility_date": "2026-07-13",
+  "compatibility_flags": ["nodejs_compat"],
+  "main": "./src/server.ts",
+  "name": "holston-workspace",
+  "assets": {
+    "directory": "./dist/client",
+    "binding": "ASSETS"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "HolstonAgent",
+        "name": "HolstonAgent"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "new_sqlite_classes": ["HolstonAgent"],
+      "tag": "v1"
+    }
+  ],
+  "ai": {
+    "binding": "AI"
+  },
+  "r2_buckets": [
+    {
+      "binding": "SKILLS_BUCKET",
+      "bucket_name": "holston-skills"
+    }
+  ],
+  "vectorize": [
+    {
+      "binding": "SKILLS_INDEX",
+      "index_name": "holston-skills-v1",
+      "index_config": {
+        "dimensions": 384,
+        "metric": "cosine"
+      }
+    }
+  ],
+  "vars": {
+    "TEAM_DOMAIN": "",
+    "POLICY_AUD": ""
+  }
+}

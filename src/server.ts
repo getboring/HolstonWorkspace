@@ -1,9 +1,11 @@
 import {
   Session,
   Think,
+  defaultContextOverflowClassifier,
   skills,
   type Action,
   type ActionAuthorizationDecision,
+  type ChatErrorClassification,
   type ChatResponseResult,
   type ThinkScheduledTasks,
   type ToolCallContext,
@@ -40,6 +42,7 @@ import {
 import { R2SkillProvider } from "agents/experimental/memory/session";
 import { createActions } from "./actions";
 import { agentNameFromEmail, verifyAccessJWT, type AuthUser } from "./auth";
+import { subscribeObservability } from "./observability";
 import { sendPush } from "./push";
 import { ReceiptStore, type Receipt } from "./receipts";
 import {
@@ -87,9 +90,11 @@ export class HolstonAgent extends Think<Env, HolstonState> {
   initialState: HolstonState = INITIAL_STATE;
 
   // Compact-and-retry when a turn overflows the model context instead of
-  // hard-failing; abort a stalled stream after 45s into recovery.
+  // hard-failing. The stall watchdog measures the gap BETWEEN stream chunks,
+  // which includes server-side tool execution (bash builds, MCP calls, HTTP
+  // fetches) — so it must sit above the slowest tool, not just model TTFT.
   contextOverflow = { reactive: true, maxRetries: 1 };
-  chatStreamStallTimeoutMs = 45_000;
+  chatStreamStallTimeoutMs = 120_000;
 
   // Read-only, allowlisted HTTP fetch so "research" in the system prompt is real
   // (backs it without needing an MCP server). GET-only, bounded, audited.
@@ -104,8 +109,14 @@ export class HolstonAgent extends Think<Env, HolstonState> {
 
   #skillStore?: SkillStore;
   #receiptStore?: ReceiptStore;
+  #obsDisposer?: () => void;
 
   override async onStart() {
+    // Surface scheduled-task / chat-recovery / MCP failures that are otherwise
+    // silent. Idempotent per isolate — dispose any prior subscription first.
+    this.#obsDisposer?.();
+    this.#obsDisposer = subscribeObservability();
+
     // Schema evolution: backfill any settings fields added after this DO's
     // state was first persisted (e.g. `timezone`), so older instances get new
     // defaults instead of `undefined`.
@@ -294,6 +305,33 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     }
     // Actions may have written receipts this turn; refresh the badge count.
     this.syncReceiptCount();
+  }
+
+  /**
+   * Classify turn errors so `contextOverflow.reactive` (compact-and-retry) can
+   * fire — Think never matches provider error strings itself, so without this
+   * the reactive backstop is a no-op. We use the SDK's default classifier
+   * (Anthropic/OpenAI/Google/…) plus the Workers AI overflow shape we run.
+   */
+  override classifyChatError(error: unknown): ChatErrorClassification | void {
+    const fromDefault = defaultContextOverflowClassifier(error);
+    if (fromDefault) return fromDefault;
+    // AI SDK APICallErrors bury the provider text in responseBody, not message —
+    // inspect both so a Workers AI overflow string is caught either way.
+    const parts = [
+      error instanceof Error ? error.message : String(error ?? ""),
+      typeof (error as { responseBody?: unknown })?.responseBody === "string"
+        ? (error as { responseBody: string }).responseBody
+        : "",
+    ];
+    const haystack = parts.join(" ");
+    if (
+      /context (window|length)|too (long|many tokens)|max.*token|input.*too large|exceeds?.*(context|token)/i.test(
+        haystack,
+      )
+    ) {
+      return "context_overflow";
+    }
   }
 
   /**

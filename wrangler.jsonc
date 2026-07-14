@@ -39,6 +39,7 @@
   ],
   "vars": {
     "TEAM_DOMAIN": "",
-    "POLICY_AUD": ""
+    "POLICY_AUD": "",
+    "MCP_SERVER_URL": ""
   }
 }

@@ -8,23 +8,27 @@
 ## What It Does
 
 - **Agent loop** via Think + Workers AI (kimi-k2.7-code, zero API keys)
-- **Self-improving skills** (auto-create from experience, vector retrieval, in-flight patching)
+- **Self-improving skills** (auto-create from experience via LLM curator, vector retrieval, in-flight patching)
 - **Multi-platform messaging** (Telegram, Email, WebSocket chat)
 - **Scheduled tasks** (declarative cron DSL: daily digest, weekly skill review)
 - **Workspace tools** (bash, read, write, edit, grep, find, list, delete)
-- **MCP client** (connect to any MCP server, auto-discover tools)
+- **MCP client** (connects to MCP servers on startup, auto-discovers tools)
+- **Voice input** (STT dictation via @cloudflare/voice)
+- **Reasoning traces** (show/hide toggle on assistant messages)
 - **Cloudflare Access** (JWT auth at edge, per-user agent isolation)
-- **Kumo UI** (chat, skills browser, settings, tool approval)
-- **Dark mode** (auto via `prefers-color-scheme`)
+- **Dark mode** (toggle with localStorage persistence)
+- **Tool approval** (modal for destructive operations)
+- **Tool output display** (running, done, rejected states in chat)
+- **Error boundary** (graceful error handling)
 
 ## Quick Start
 
 ```bash
 npm install --legacy-peer-deps
-npm run dev          # Local dev server
-npm run build        # Production build
+npm run start       # Local dev server
+npm run build       # Production build
 npm run deploy      # Build + wrangler deploy
-npm run typecheck    # TypeScript check
+npm run typecheck   # TypeScript check
 ```
 
 ## Architecture
@@ -33,10 +37,10 @@ npm run typecheck    # TypeScript check
 src/server.ts          HolstonAgent (Think) + Worker fetch/email handler
 src/auth.ts            Cloudflare Access JWT verification
 src/skills/store.ts    R2 + Vectorize skill CRUD with embeddings
-src/skills/hooks.ts    beforeTurn (retriever) + onChatResponse (nudger)
+src/skills/hooks.ts    beforeTurn (retriever) + onChatResponse (nudger + curator)
 src/skills/tools.ts    skill_create, skill_patch, skill_load, skill_list, skill_search
-src/app.tsx            React app (chat, skills, settings tabs)
-src/components/        ChatView, SessionList, SkillsPanel, SettingsPanel, ToolApproval
+src/app.tsx            React app (chat, skills, settings, dark mode, voice)
+src/components/        ChatView, SessionList, SkillsPanel, SettingsPanel, ToolApproval, ErrorBoundary
 skills/                Bundled SKILL.md files (agents:skills)
 ```
 
@@ -48,7 +52,8 @@ skills/                Bundled SKILL.md files (agents:skills)
 | GET | `/` | Web dashboard (React app) |
 | GET | `/setup/info` | Agent info + auth status |
 | POST | `/setup/telegram-webhook` | Register Telegram webhook |
-| WS | `/agents/:agentName` | WebSocket chat (Think) |
+| GET | `/api/skills` | List all skills from R2 (CORS enabled) |
+| WS | `/agents/HolstonAgent/:id` | WebSocket chat (Think) |
 | POST | `/messengers/telegram/webhook` | Telegram webhook receiver |
 
 ## Setup
@@ -82,6 +87,12 @@ skills/                Bundled SKILL.md files (agents:skills)
 1. Dashboard > Email > Routing > Routes
 2. Forward to Worker: `holston-workspace`
 
+### MCP Server
+
+```bash
+npx wrangler secret put MCP_SERVER_URL   # https://your-mcp-server.com/sse
+```
+
 ### CI/CD
 
 GitHub Actions deploys on push to `main`. Set these repo secrets:
@@ -91,6 +102,7 @@ GitHub Actions deploys on push to `main`. Set these repo secrets:
 ## Skills
 
 Skills auto-create when the agent solves complex tasks (5+ tool calls).
+The curator hook uses `generateObject` with Workers AI to extract a structured skill from the session transcript.
 Stored in R2, embedded in Vectorize for semantic retrieval.
 
 Seed skills: `deploy-worker`, `create-skill`, `debug-agent`, `home-automation`

@@ -34,9 +34,26 @@ export class ReceiptStore {
       actor TEXT NOT NULL,
       created_at TEXT NOT NULL
     )`;
+    // Enforce one receipt per (action, idempotency_key). SQLite treats NULLs as
+    // distinct, so unkeyed actions still each insert a row.
+    this.agent.sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_receipts_key
+      ON action_receipts (action, idempotency_key)
+      WHERE idempotency_key IS NOT NULL`;
   }
 
-  /** Write an immutable receipt for an executed action. Idempotent by id. */
+  /** Whether a receipt already exists for this idempotency key. */
+  hasKey(idempotencyKey: string): boolean {
+    const rows = this.agent.sql<{ n: number }>`
+      SELECT COUNT(*) AS n FROM action_receipts
+      WHERE idempotency_key = ${idempotencyKey}`;
+    return (rows[0]?.n ?? 0) > 0;
+  }
+
+  /**
+   * Write an immutable receipt. Deduped by (action, idempotency_key) via the
+   * unique index — a repeat with the same key is a no-op (returns the existing
+   * row's identity is not needed; the caller's data is returned for logging).
+   */
   write(receipt: Omit<Receipt, "id" | "createdAt"> & { id?: string }): Receipt {
     const row: Receipt = {
       id: receipt.id ?? crypto.randomUUID(),

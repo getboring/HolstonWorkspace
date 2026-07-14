@@ -46,7 +46,10 @@ export async function verifyAccessJWT(
     }
 
     return { email, name, sub };
-  } catch {
+  } catch (err) {
+    // Fail closed, but log so a JWKS fetch outage is distinguishable from an
+    // actually-invalid token (both otherwise surface as a blanket 401).
+    console.warn("[holston] Access JWT verification failed:", err);
     return null;
   }
 }

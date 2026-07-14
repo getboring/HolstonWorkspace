@@ -22,9 +22,13 @@ interface ChatViewProps {
   sendMessage: (msg: { text: string }) => void;
   isLoading: boolean;
   isListening: boolean;
+  /** Accumulated final transcript from the voice hook (source of truth). */
+  transcript: string;
+  /** In-progress partial transcript (updates in place; do NOT accumulate). */
   interimTranscript: string | null;
   onVoiceStart: () => void;
   onVoiceStop: () => void;
+  onVoiceClear: () => void;
 }
 
 export function ChatView({
@@ -33,31 +37,42 @@ export function ChatView({
   sendMessage,
   isLoading,
   isListening,
+  transcript,
   interimTranscript,
   onVoiceStart,
   onVoiceStop,
+  onVoiceClear,
 }: ChatViewProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const [input, setInput] = useState("");
-  const transcriptRef = useRef("");
+  const [typed, setTyped] = useState("");
 
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // When dictation stops, seed the editable field with the final transcript so
+  // the user can review/edit before sending, then clear the hook's buffer.
   useEffect(() => {
-    if (isListening && interimTranscript) {
-      transcriptRef.current = (transcriptRef.current + " " + interimTranscript).trim();
-      setInput(transcriptRef.current);
+    if (!isListening && transcript.trim()) {
+      setTyped(transcript.trim());
+      onVoiceClear();
     }
-  }, [isListening, interimTranscript]);
+  }, [isListening, transcript, onVoiceClear]);
+
+  // While the mic is active, the voice hook owns the value: its final
+  // `transcript` plus the in-place `interimTranscript` (never accumulated).
+  const voiceText = [transcript, interimTranscript]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+  const input = isListening ? voiceText : typed;
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim() || isLoading) return;
     sendMessage({ text: input });
-    setInput("");
-    transcriptRef.current = "";
+    setTyped("");
+    onVoiceClear();
   };
 
   return (
@@ -102,10 +117,10 @@ export function ChatView({
           <div className="flex-1">
             <Input
               value={input}
-              onChange={(e) => setInput(e.target.value)}
+              onChange={(e) => setTyped(e.target.value)}
               placeholder={isListening ? "Listening…" : "Message Holston…"}
               aria-label="Message Holston"
-              disabled={isLoading}
+              disabled={isLoading || isListening}
             />
           </div>
           {isLoading ? (

@@ -29,6 +29,7 @@
   "devDependencies": {
     "@ai-sdk/react": "3.0.227",
     "@babel/core": "8.0.1",
+    "@cloudflare/ai-chat": "0.9.3",
     "@cloudflare/vite-plugin": "^1.42.3",
     "@cloudflare/workers-types": "^5.20260708.1",
     "@tailwindcss/vite": "^4",

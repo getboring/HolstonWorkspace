@@ -1,37 +1,35 @@
 import { useAgent } from "agents/react";
-import { useAgentChat } from "@cloudflare/think/react";
+import { useAgentChat } from "@cloudflare/ai-chat/react";
 import { useState, type ReactNode } from "react";
 import { ChatView } from "./components/ChatView";
 import { SessionList } from "./components/SessionList";
 import { SkillsPanel } from "./components/SkillsPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
-import { ToolApproval } from "./components/ToolApproval";
 import { PoweredBy } from "./components/PoweredBy";
-
-const AGENT_NAME = "default";
 
 export function App() {
   const [activeTab, setActiveTab] = useState<"chat" | "skills" | "settings">("chat");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [localInput, setLocalInput] = useState("");
 
-  const { agent } = useAgent({
-    agent: AGENT_NAME,
-    name: "HolstonAgent",
-  });
+  const agent = useAgent({
+    agent: "HolstonAgent",
+    name: "default",
+    onOpen: () => console.log("[holston] WebSocket connected"),
+    onClose: () => console.log("[holston] WebSocket disconnected"),
+    onError: (error: Event) => console.error("[holston] WebSocket error:", error),
+  } as never);
 
-  const { messages, status, stop, sendMessage, addToolResult } = useAgentChat({
+  const {
+    messages,
+    status,
+    stop,
+    sendMessage,
+  } = useAgentChat({
     agent,
   } as never);
 
   const isLoading = status === "streaming" || status === "submitted";
-
-  const pendingTool = messages.find((m) => {
-    const parts = (m as { parts?: Array<{ type: string; state?: string }> }).parts;
-    return parts?.some(
-      (p) => p.type === "tool-invocation" && p.state === "input-available",
-    );
-  });
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -74,7 +72,7 @@ export function App() {
 
         {activeTab === "chat" && (
           <ChatView
-            messages={messages}
+            messages={messages as never as ReactNode[]}
             input={localInput}
             handleSubmit={handleSubmit}
             handleInputChange={handleInputChange}
@@ -85,15 +83,6 @@ export function App() {
 
         {activeTab === "skills" && <SkillsPanel />}
         {activeTab === "settings" && <SettingsPanel />}
-
-        {pendingTool && (
-          <ToolApproval
-            toolName="pending"
-            input={{}}
-            onApprove={() => addToolResult({ toolCallId: "", output: { approved: true } } as never)}
-            onReject={() => addToolResult({ toolCallId: "", output: { approved: false } } as never)}
-          />
-        )}
 
         <PoweredBy />
       </div>

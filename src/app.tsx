@@ -1,6 +1,6 @@
+import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/think/react";
-import { useState } from "react";
-import type { UIMessage } from "ai";
+import { useState, type ReactNode } from "react";
 import { ChatView } from "./components/ChatView";
 import { SessionList } from "./components/SessionList";
 import { SkillsPanel } from "./components/SkillsPanel";
@@ -15,26 +15,28 @@ export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [localInput, setLocalInput] = useState("");
 
-  const { messages, status, stop, sendMessage, addToolResult } = useAgentChat({
+  const { agent } = useAgent({
     agent: AGENT_NAME,
     name: "HolstonAgent",
-    maxSteps: 50,
+  });
+
+  const { messages, status, stop, sendMessage, addToolResult } = useAgentChat({
+    agent,
   } as never);
 
   const isLoading = status === "streaming" || status === "submitted";
 
-  const pendingTool = messages.find((m: UIMessage) =>
-    m.parts?.some(
-      (p: { type: string; state?: string }) =>
-        p.type === "tool-invocation" &&
-        p.state === "input-available",
-    ),
-  );
+  const pendingTool = messages.find((m) => {
+    const parts = (m as { parts?: Array<{ type: string; state?: string }> }).parts;
+    return parts?.some(
+      (p) => p.type === "tool-invocation" && p.state === "input-available",
+    );
+  });
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!localInput.trim() || isLoading) return;
-    sendMessage({ text: localInput });
+    sendMessage({ text: localInput } as never);
     setLocalInput("");
   };
 
@@ -106,7 +108,7 @@ function TabButton({
 }: {
   active: boolean;
   onClick: () => void;
-  children: React.ReactNode;
+  children: ReactNode;
 }) {
   return (
     <button

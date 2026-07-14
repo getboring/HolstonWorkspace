@@ -30,14 +30,17 @@ const skillLoadSchema = z.object({
 export function createSkillTools(
   store: SkillStore,
   _agent: Think<Env>,
+  gated = true,
 ) {
+  // Skill writes are gated (client approval modal) unless approvalMode is "never".
+  const needsApproval = async () => gated;
   return {
     skill_create: tool({
       description:
         "Create a reusable skill from a successful task. Use after solving a complex problem (5+ tool calls). " +
         "The skill should capture the procedure so it can be reused next time.",
       inputSchema: skillCreateSchema,
-      needsApproval: async () => true,
+      needsApproval,
       execute: async (input) => {
         const existing = await store.get(input.name);
         if (existing) {
@@ -62,7 +65,7 @@ export function createSkillTools(
         "Update an existing skill. Use when a loaded skill is wrong or incomplete. " +
         "Only the fields you provide will be updated; the rest stay unchanged.",
       inputSchema: skillPatchSchema,
-      needsApproval: async () => true,
+      needsApproval,
       execute: async (input) => {
         const updated = await store.patch(input.name, {
           description: input.description,

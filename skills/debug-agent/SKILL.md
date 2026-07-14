@@ -16,7 +16,7 @@ updated_at: 2026-07-13T22:00:00Z
 1. **Check DO state**: Is the agent object alive? Use `npx wrangler tail` to see real-time logs.
 2. **Check WebSocket**: Is the client connected? Look for `onConnect` / `onClose` logs.
 3. **Check alarms**: Are scheduled tasks firing? Look for `alarm()` in logs.
-4. **Check MCP**: Is the MCP server reachable? `this.mcp.getConnections()` returns server status.
+4. **Check MCP**: Is the MCP server reachable? `this.getMcpServers()` returns server state + tools; the MCP tab shows live status.
 5. **Check model**: Is Workers AI returning errors? Check for `AiError` in logs.
 6. **Check state**: Is SQLite healthy? `this.sql` queries should return without error.
 

@@ -7,6 +7,7 @@ import { Button } from "@cloudflare/kumo/components/button";
 import { useEffect, useState } from "react";
 import type { HolstonAgentConnection } from "../app";
 import {
+  TIMEZONES,
   WORKERS_AI_MODELS,
   type ApprovalMode,
   type HolstonState,
@@ -60,7 +61,7 @@ export function SettingsPanel({
             <Switch checked={s.autoSkills} onCheckedChange={(v) => patch({ autoSkills: v })} aria-label="Auto skill proposals" />
           </div>
 
-          <Field label="Tool approval" description="When Holston must ask before running a tool.">
+          <Field label="Tool approval" description="When Holston must ask before running a tool. 'Always' blocks bash/write/edit/delete; 'destructive-only' gates skill writes.">
             <Select
               value={s.approvalMode}
               onValueChange={(v) => patch({ approvalMode: v as ApprovalMode })}
@@ -69,6 +70,18 @@ export function SettingsPanel({
               <Select.Option value="always">Always ask</Select.Option>
               <Select.Option value="destructive-only">Destructive only (recommended)</Select.Option>
               <Select.Option value="never">Never ask</Select.Option>
+            </Select>
+          </Field>
+
+          <Field label="Timezone" description="Reminders and recurring schedules resolve in this zone.">
+            <Select
+              value={s.timezone ?? "America/New_York"}
+              onValueChange={(v) => v && patch({ timezone: v })}
+              aria-label="Timezone"
+            >
+              {TIMEZONES.map((tz) => (
+                <Select.Option key={tz} value={tz}>{tz.replace("_", " ")}</Select.Option>
+              ))}
             </Select>
           </Field>
         </Surface>

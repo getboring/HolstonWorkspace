@@ -67,6 +67,16 @@ const AGENT_CLASS = "HolstonAgent";
 const SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{1,63}$/;
 const REMINDER_CALLBACK = "runReminder";
 
+/**
+ * Reminder schedule payload. `localCron`/`tz` are present only for recurring
+ * reminders, so the UTC cron can be re-derived across DST transitions.
+ */
+interface ReminderPayload {
+  message: string;
+  localCron?: string;
+  tz?: string;
+}
+
 // Built-in workspace tools that can mutate the workspace or run code. Gated by
 // approvalMode; read-only tools (read/list/find/grep) are never gated.
 const DESTRUCTIVE_TOOLS = new Set(["bash", "write", "edit", "delete"]);
@@ -112,7 +122,9 @@ export class HolstonAgent extends Think<Env, HolstonState> {
         console.error("[holston] MCP server registration failed:", err);
       }
     }
-    // Reconcile the synced view of MCP servers + reminders on every wake.
+    // Correct any recurring-reminder DST drift, then reconcile the synced view
+    // of MCP servers + reminders on every wake.
+    await this.reconcileCronDrift();
     await this.syncMcpState();
     await this.syncReminders();
   }
@@ -403,7 +415,7 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     });
 
     const message = (object.message || request).trim();
-    let schedule: Schedule<{ message: string }>;
+    let schedule: Schedule<ReminderPayload>;
 
     if (object.kind === "once" && object.datetime.trim()) {
       // Convert the local wall-clock time (in the user's zone) to a real instant.
@@ -415,14 +427,21 @@ export class HolstonAgent extends Think<Env, HolstonState> {
       }
       schedule = await this.schedule(date, REMINDER_CALLBACK, { message });
     } else if (object.kind === "recurring" && object.cron.trim()) {
-      // Agent.schedule runs cron in UTC; shift the local cron hour by the zone offset.
-      const cron = shiftCronToUtc(object.cron, tz);
+      // Agent.schedule runs cron in UTC; shift the local cron hour by the zone
+      // offset. The local cron + tz ride in the payload so DST drift can be
+      // re-corrected on wake (see reconcileCronDrift).
+      const localCron = object.cron.trim();
+      const cron = shiftCronToUtc(localCron, tz);
       if (!cron) {
         throw new Error(
           "Could not parse that recurring time. Try 'every weekday at 9am'.",
         );
       }
-      schedule = await this.schedule(cron, REMINDER_CALLBACK, { message });
+      schedule = await this.schedule(cron, REMINDER_CALLBACK, {
+        message,
+        localCron,
+        tz,
+      });
     } else {
       throw new Error(
         "Could not parse a time from that request. Try 'tomorrow at 3pm' or 'every weekday at 9am'.",
@@ -446,10 +465,31 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     return { ok };
   }
 
-  /** Schedule callback: fires the reminder across every channel we have. */
-  async runReminder(payload: { message: string }) {
+  /**
+   * Schedule callback: fires the reminder across every channel. Alarm delivery
+   * is at-least-once, so we dedupe on a stable per-occurrence key: a bucketed
+   * minute keeps a retry of the SAME firing from double-notifying while letting
+   * a genuine next occurrence (different minute) through.
+   */
+  async runReminder(payload: ReminderPayload) {
+    const occurrence = Math.floor(Date.now() / 60000); // minute bucket
+    const dedupeKey = `reminder:${occurrence}:${payload.message}`;
+
+    if (this.receiptStore().hasKey(dedupeKey)) {
+      return; // already fired this occurrence
+    }
+    this.receiptStore().write({
+      action: "run_reminder",
+      idempotencyKey: dedupeKey,
+      input: { message: payload.message },
+      output: { firedAt: new Date().toISOString() },
+      actor: this.name,
+    });
+    this.syncReceiptCount();
+
     await this.notifyUser("Reminder", payload.message, { url: "/" });
-    // Also inject it into the conversation so the model can act on it.
+    // Inject it into the conversation; the same idempotency key stops a retry
+    // from adding a duplicate [Reminder] message.
     await this.submitMessages(
       [
         {
@@ -458,7 +498,7 @@ export class HolstonAgent extends Think<Env, HolstonState> {
           parts: [{ type: "text", text: `[Reminder] ${payload.message}` }],
         },
       ],
-      { metadata: { source: "reminder" } },
+      { idempotencyKey: dedupeKey, metadata: { source: "reminder" } },
     );
     await this.syncReminders();
   }
@@ -612,8 +652,27 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     const schedules = await this.listSchedules();
     const views = schedules
       .filter((s) => s.callback === REMINDER_CALLBACK)
-      .map((s) => toReminderView(s as Schedule<{ message: string }>, tz));
+      .map((s) => toReminderView(s as Schedule<ReminderPayload>, tz));
     this.setState({ ...this.state, reminders: views });
+  }
+
+  /**
+   * `Agent.schedule` cron runs in UTC, so a recurring reminder's baked UTC hour
+   * drifts by an hour across a DST transition. On wake, re-derive the UTC cron
+   * from each reminder's stored local cron + tz; if it changed, reschedule.
+   */
+  private async reconcileCronDrift() {
+    const schedules = await this.listSchedules();
+    for (const s of schedules) {
+      if (s.callback !== REMINDER_CALLBACK || s.type !== "cron") continue;
+      const payload = (s as Schedule<ReminderPayload>).payload;
+      if (!payload?.localCron || !payload.tz) continue;
+      const expected = shiftCronToUtc(payload.localCron, payload.tz);
+      if (expected && expected !== s.cron) {
+        await this.cancelSchedule(s.id);
+        await this.schedule(expected, REMINDER_CALLBACK, payload);
+      }
+    }
   }
 
   private skillStore(): SkillStore {
@@ -720,6 +779,11 @@ function tzOffsetMinutes(date: Date, timeZone: string): number {
 /**
  * Interpret "YYYY-MM-DDTHH:MM:SS" as wall-clock time in `timeZone` and return
  * the real UTC instant. Returns null if unparseable.
+ *
+ * The offset must be evaluated at the RESULT instant, not the provisional
+ * guess — near a DST boundary those differ by the DST delta. We converge in
+ * two passes (a single correction is wrong exactly when the guess and result
+ * straddle the transition).
  */
 function localWallClockToUtc(local: string, timeZone: string): Date | null {
   const m = local
@@ -728,11 +792,17 @@ function localWallClockToUtc(local: string, timeZone: string): Date | null {
   if (!m) return null;
   const [, y, mo, d, h, mi, s] = m;
   if (!y || !mo || !d || !h || !mi) return null;
-  // Provisional UTC guess, then correct by the zone's offset at that instant.
-  const guess = Date.UTC(+y, +mo - 1, +d, +h, +mi, s ? +s : 0);
-  const offset = tzOffsetMinutes(new Date(guess), timeZone);
-  const result = new Date(guess + offset * 60000);
-  return Number.isNaN(result.getTime()) ? null : result;
+
+  const target = Date.UTC(+y, +mo - 1, +d, +h, +mi, s ? +s : 0);
+  // First correction using the offset at the provisional instant...
+  let result = target + tzOffsetMinutes(new Date(target), timeZone) * 60000;
+  // ...then re-evaluate at the corrected instant and adjust if the offset
+  // changed (a DST boundary lies between the two).
+  const refined = target + tzOffsetMinutes(new Date(result), timeZone) * 60000;
+  if (refined !== result) result = refined;
+
+  const date = new Date(result);
+  return Number.isNaN(date.getTime()) ? null : date;
 }
 
 /**
@@ -756,7 +826,7 @@ function shiftCronToUtc(cron: string, timeZone: string): string | null {
 }
 
 function toReminderView(
-  schedule: Schedule<{ message: string }>,
+  schedule: Schedule<ReminderPayload>,
   timeZone: string,
 ): ReminderView {
   const message = schedule.payload?.message ?? "(reminder)";

@@ -64,7 +64,10 @@ export function createActions(deps: ActionDeps): Record<string, Action> {
           .optional()
           .describe("Stable id to avoid sending the same message twice"),
       }),
-      idempotencyKey: ({ input }) => `send:${input.ref ?? input.title}`,
+      // Only dedupe when the model supplies an explicit ref. Deduping on title
+      // would silently swallow unrelated messages that share a title.
+      idempotencyKey: ({ input }) =>
+        input.ref ? `send:${input.ref}` : `send:${crypto.randomUUID()}`,
       permissions: ["notify:send"],
       approvalRisk: "low",
       approval: gate("low"),
@@ -87,13 +90,16 @@ export function createActions(deps: ActionDeps): Record<string, Action> {
           .max(300)
           .describe("What to be reminded of and when, in plain language"),
       }),
+      // Same exact request = same reminder; a retry after a stall shouldn't
+      // create a duplicate schedule.
+      idempotencyKey: ({ input }) => `reminder:${input.request}`,
       permissions: ["reminder:write"],
       approvalRisk: "low",
       approval: gate("low"),
       execute: async ({ request }) => {
         const summary = await deps.createReminder(request);
         const output = { scheduled: summary };
-        receipt("set_reminder", null, { request }, output);
+        receipt("set_reminder", `reminder:${request}`, { request }, output);
         return output;
       },
     }),
@@ -105,13 +111,15 @@ export function createActions(deps: ActionDeps): Record<string, Action> {
       inputSchema: z.object({
         fact: z.string().min(3).max(500).describe("A concise fact to remember"),
       }),
+      // Remembering the same fact twice is a no-op.
+      idempotencyKey: ({ input }) => `memory:${input.fact}`,
       permissions: ["memory:write"],
       approvalRisk: "low",
       approval: gate("low"),
       execute: async ({ fact }) => {
         await deps.saveMemory(fact);
         const output = { remembered: fact };
-        receipt("save_memory", null, { fact }, output);
+        receipt("save_memory", `memory:${fact}`, { fact }, output);
         return output;
       },
     }),
@@ -134,11 +142,3 @@ export function createActions(deps: ActionDeps): Record<string, Action> {
     }),
   };
 }
-
-/** Every permission any action can require — for the default authorized grant. */
-export const ALL_PERMISSIONS = [
-  "notify:send",
-  "reminder:write",
-  "memory:write",
-  "skill:write",
-] as const;

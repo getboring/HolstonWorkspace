@@ -23,9 +23,14 @@ export function SettingsPanel({
 }) {
   const s = state.settings;
   const [instructions, setInstructions] = useState(s.customInstructions);
+  const [dirty, setDirty] = useState(false);
   const [savingInstructions, setSavingInstructions] = useState(false);
 
-  useEffect(() => setInstructions(s.customInstructions), [s.customInstructions]);
+  // Adopt a server-side change only when the user isn't mid-edit, so an
+  // unrelated state sync never clobbers an in-progress draft.
+  useEffect(() => {
+    if (!dirty) setInstructions(s.customInstructions);
+  }, [s.customInstructions, dirty]);
 
   const patch = (p: Parameters<HolstonAgentConnection["stub"]["updateSettings"]>[0]) =>
     agent.stub.updateSettings(p);
@@ -95,7 +100,7 @@ export function SettingsPanel({
             <textarea
               className="w-full min-h-28 rounded-lg border border-kumo-line bg-kumo-base p-2 text-kumo-default text-sm holston-scroll"
               value={instructions}
-              onChange={(e) => setInstructions(e.target.value)}
+              onChange={(e) => { setInstructions(e.target.value); setDirty(true); }}
               placeholder="You focus on Cloudflare-native solutions. Prefer concise answers…"
               maxLength={4000}
             />
@@ -110,6 +115,7 @@ export function SettingsPanel({
                 setSavingInstructions(true);
                 try {
                   await patch({ customInstructions: instructions });
+                  setDirty(false);
                 } finally {
                   setSavingInstructions(false);
                 }

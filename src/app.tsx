@@ -119,7 +119,7 @@ function Workspace({ agentName, dark, setDark }: { agentName: string; dark: bool
   const { messages, status, stop, sendMessage, addToolApprovalResponse } = useAgentChat({ agent });
   const isLoading = status === "streaming" || status === "submitted";
 
-  const { interimTranscript, isListening, start, stop: stopVoice } =
+  const { transcript, interimTranscript, isListening, start, stop: stopVoice, clear: clearVoice } =
     useVoiceInput({ agent: "HolstonAgent", name: agentName });
 
   const pendingPart = findPendingApproval(messages);
@@ -175,9 +175,11 @@ function Workspace({ agentName, dark, setDark }: { agentName: string; dark: bool
               sendMessage={sendMessage}
               isLoading={isLoading}
               isListening={isListening}
+              transcript={transcript}
               interimTranscript={interimTranscript}
               onVoiceStart={start}
               onVoiceStop={stopVoice}
+              onVoiceClear={clearVoice}
             />
           )}
           {activeTab === "tasks" && <TasksPanel agent={agent} state={state} />}

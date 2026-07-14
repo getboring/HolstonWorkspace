@@ -24,6 +24,22 @@ const STATE_VARIANT: Record<McpServerView["state"], "primary" | "secondary" | "d
   failed: "destructive",
 };
 
+/**
+ * Open an OAuth authorization URL. The URL originates from an MCP server
+ * (untrusted), so only http(s) is allowed — this blocks javascript:/data: URLs.
+ * Returns false if the URL was rejected.
+ */
+function openAuthUrl(authUrl: string): boolean {
+  try {
+    const parsed = new URL(authUrl);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return false;
+    window.open(parsed.href, "_blank", "noopener,noreferrer");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function McpPanel({
   agent,
   state,
@@ -44,7 +60,9 @@ export function McpPanel({
     try {
       const result = await agent.stub.connectMcpServer(name.trim(), url.trim());
       if (result.state === "authenticating" && result.authUrl) {
-        window.open(result.authUrl, "_blank", "noopener");
+        if (!openAuthUrl(result.authUrl)) {
+          setError("Server returned an invalid authorization URL.");
+        }
       }
       setName("");
       setUrl("");
@@ -131,7 +149,7 @@ function ServerRow({ server, onDisconnect }: { server: McpServerView; onDisconne
           size="sm"
           variant="secondary"
           icon={ArrowSquareOutIcon}
-          onClick={() => window.open(server.authUrl!, "_blank", "noopener")}
+          onClick={() => server.authUrl && openAuthUrl(server.authUrl)}
         >
           Authorize
         </Button>

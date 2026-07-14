@@ -8,22 +8,25 @@
 ## What It Does
 
 - **Agent loop** via Think + Workers AI (model chosen live from Settings, zero API keys)
+- **Code execution** (Cloudflare Codemode — the model runs generated code in an isolated Worker via a `LOADER` binding, with the workspace, tools, and browser available)
+- **Browser automation** (Cloudflare Browser Rendering — navigate, screenshot, extract, scrape, via a `BROWSER` binding)
+- **Workspace tools** (bash, read, write, edit, grep, find, list, delete — Think's built-in virtual filesystem over the DO's SQLite)
+- **Read-only web fetch** (allowlisted `fetch_url`: CF docs, Wikipedia, raw.githubusercontent, api.github)
 - **Self-improving skills** (LLM curator proposes skills after complex turns → staged for your approval → vector retrieval)
 - **Client-managed MCP** (add/remove/authenticate MCP servers from the UI, live tool counts and OAuth handoff — no more single hardcoded env var)
-- **Reminders & recurring tasks** (natural-language scheduling: "every weekday at 9am"; fires across push, Telegram, email, and the chat)
+- **Reminders & recurring tasks** (natural-language scheduling in your timezone: "every weekday at 9am"; fires across push, Telegram, email, and the chat; DST drift self-corrects on wake)
 - **Web Push** (VAPID; reach the user with reminders and proactive messages even when the tab is closed)
-- **Actions with receipts** (gated server actions — send_message, set_reminder, save_memory, remove_skill — following the write-path: validate → idempotency → authorize → execute → immutable receipt; every one auditable in the Receipts tab)
+- **Actions with receipts** (gated server actions — send_message, set_reminder, save_memory, remove_skill — following the Boring Stack write-path: validate → idempotency → authorize → execute → immutable receipt; every one auditable in the Receipts tab)
 - **Persistent memory** (durable facts the model remembers across conversations via a writable context block, plus non-destructive compaction and FTS5 history search)
 - **Synced settings** (model, auto-skills, tool-approval mode, timezone, custom instructions — stored on the agent, drive every turn)
-- **Multi-platform messaging** (Telegram, Email in + out, WebSocket chat)
+- **Multi-platform messaging** (Telegram, Email in + out with AI triage, WebSocket chat)
 - **Scheduled tasks** (declarative cron DSL: daily digest, weekly skill review)
-- **Workspace tools** (bash, read, write, edit, grep, find, list, delete)
 - **Voice input** (STT dictation via @cloudflare/voice)
-- **Reasoning traces** (collapsible on assistant messages)
-- **Cloudflare Access** (JWT auth at edge, per-user agent isolation, state read-only from clients)
-- **Kumo UI** (Cloudflare's design system — accessible, themed, light/dark)
-- **Tool approval** (Kumo dialog for gated operations)
-- **Error boundary** (graceful error handling)
+- **Resilience** (circuit breaker on external calls, context-overflow compact-and-retry, stall watchdog, diagnostics subscriptions for scheduled-task/chat/MCP failures)
+- **Cloudflare Access** (JWT auth at edge, per-user agent isolation, state read-only from clients, CSRF guard on browser mutations)
+- **Kumo UI** (Cloudflare's design system — accessible, themed, light/dark; Chat, Tasks, MCP, Skills, Receipts, Settings tabs)
+- **Tool approval** (Kumo dialog for gated operations; `approvalMode` enforced via `beforeToolCall`)
+- **Reasoning traces + error boundary** (collapsible reasoning; graceful error handling)
 
 ## Quick Start
 
@@ -38,18 +41,28 @@ npm run typecheck   # TypeScript check
 ## Architecture
 
 ```
-src/server.ts          HolstonAgent (Think) with synced state + @callable RPC + Worker fetch/email
-src/shared/state.ts    HolstonState contract shared by server + client (settings, reminders, MCP, push)
+src/server.ts          HolstonAgent (Think): synced state, @callable RPC, getTools (code-exec +
+                       browser + skills), getActions, configureSession, classifyChatError,
+                       beforeToolCall gate, onEmail (triage + reply), Worker fetch/email handler
+src/actions.ts         Think action() tools (send_message, set_reminder, save_memory, remove_skill)
+src/receipts.ts        Immutable append-only receipt ledger in DO SQLite (UNIQUE + read index)
+src/observability.ts   diagnostics_channel subscriptions (schedule / chat / fiber / mcp failures)
+src/shared/state.ts    HolstonState contract shared by server + client
+src/core/result.ts     Result<T> / ok / fail / statusFor (never-throw convention)
+src/core/circuit-breaker.ts  withCircuitBreaker / withTimeout for external calls
+src/core/csrf.ts       assertSameOrigin (CSRF guard for browser mutations)
 src/push.ts            Web Push (VAPID) send helper, dead-subscription pruning
 src/auth.ts            Cloudflare Access JWT verification
-src/skills/store.ts    R2 + Vectorize skill CRUD (approved/) + curator staging (pending/)
+src/skills/store.ts    R2 + Vectorize skill CRUD (approved/) + curator staging (pending/), circuit-broken search
 src/skills/hooks.ts    beforeTurn (retriever) + onChatResponse (nudger + curator)
 src/skills/tools.ts    skill_create, skill_patch, skill_load, skill_list, skill_search
 src/app.tsx            React app shell (Kumo Tabs, Toasty, typed agent stub)
 src/lib/push.ts        Client-side push subscribe (service worker + VAPID)
-src/components/        ChatView, TasksPanel, McpPanel, SkillsPanel, SettingsPanel, ToolApproval, SessionList (all Kumo)
+src/components/        ChatView, TasksPanel, McpPanel, SkillsPanel, SettingsPanel, ReceiptsPanel,
+                       MemoryCard, ToolApproval, SessionList (all Kumo)
 public/sw.js           Push service worker
 skills/                Bundled SKILL.md files (agents:skills)
+docs/plans/            Capability audit + build plans
 ```
 
 ## @callable RPC (client ↔ agent over WebSocket)
@@ -58,12 +71,14 @@ The UI drives the agent through typed RPC (`agent.stub.*`), not env vars or loca
 
 | Method | Purpose |
 |--------|---------|
-| `updateSettings(patch)` | Model, auto-skills, approval mode, custom instructions (synced state) |
+| `updateSettings(patch)` | Model, auto-skills, approval mode, timezone, custom instructions (synced state) |
 | `connectMcpServer(name, url)` / `disconnectMcpServer(id)` / `refreshMcpServers()` | Manage MCP servers; OAuth returns an `authUrl` |
-| `createReminder(text)` / `listReminders()` / `cancelReminder(id)` | Natural-language scheduling |
+| `createReminder(text)` / `listReminders()` / `cancelReminder(id)` | Natural-language scheduling (in the user's timezone) |
 | `getVapidPublicKey()` / `subscribePush(sub)` / `unsubscribePush(endpoint)` | Web Push subscription |
 | `listReceipts(limit)` | Immutable action-receipt ledger (Receipts tab) |
 | `getMemory()` | The durable `memory` context block (Memory card) |
+
+Actions the model can call (compiled into tools via `getActions()`): `send_message`, `set_reminder`, `save_memory`, `remove_skill` — each gated by `approvalMode`, idempotency-keyed, and receipted. Code execution (`execute`) and browser tools (`browser_*`) are added when the `LOADER` / `BROWSER` bindings are present.
 
 ## Endpoints
 
@@ -136,7 +151,23 @@ fire in-app and via Telegram/email — only browser push is disabled.
 ### Outbound Email (optional)
 
 Uncomment the `send_email` binding in `wrangler.jsonc` and set a verified sender
-in Cloudflare Email Routing to let the agent send/reply to email.
+in Cloudflare Email Routing to let the agent send/reply to email. Inbound email is
+AI-triaged (spam dropped, notifications not replied to) before a turn runs.
+
+### Code Execution + Browser Automation
+
+Both are wired via bindings in `wrangler.jsonc` (no secrets needed):
+
+- **`worker_loaders` → `LOADER`** enables Codemode: the `execute` tool runs the
+  model's generated code in an isolated Worker (with the workspace, tools, and
+  browser available). Present by default.
+- **`browser` → `BROWSER`** enables the `browser_*` tools (navigate/screenshot/
+  extract/scrape). Requires **Browser Rendering** enabled on your Cloudflare
+  account. If it's not enabled, remove the `browser` binding — code execution
+  still works without it.
+
+Both tools respect `approvalMode`; the system prompt only advertises a capability
+when its binding is present.
 
 ### CI/CD
 

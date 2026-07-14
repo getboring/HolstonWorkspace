@@ -34,11 +34,7 @@
   "vectorize": [
     {
       "binding": "SKILLS_INDEX",
-      "index_name": "holston-skills-v1",
-      "index_config": {
-        "dimensions": 384,
-        "metric": "cosine"
-      }
+      "index_name": "holston-skills-v1"
     }
   ],
   "vars": {

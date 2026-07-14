@@ -46,15 +46,20 @@ skills/                Bundled SKILL.md files (agents:skills)
 
 ## Endpoints
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/health` | Health check (agent status, config) |
-| GET | `/` | Web dashboard (React app) |
-| GET | `/setup/info` | Agent info + auth status |
-| POST | `/setup/telegram-webhook` | Register Telegram webhook |
-| GET | `/api/skills` | List all skills from R2 (CORS enabled) |
-| WS | `/agents/HolstonAgent/:id` | WebSocket chat (Think) |
-| POST | `/messengers/telegram/webhook` | Telegram webhook receiver |
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/health` | public | Health check |
+| GET | `/` | Access JWT | Web dashboard (React app, `run_worker_first`) |
+| GET | `/setup/info` | Access JWT | Agent instance name + auth status |
+| POST | `/setup/telegram-webhook` | Access JWT | Register Telegram webhook |
+| GET | `/api/skills` | Access JWT | Approved + pending skills |
+| POST | `/api/skills/pending/:name/approve` | Access JWT | Approve a curator proposal |
+| POST | `/api/skills/pending/:name/reject` | Access JWT | Reject a curator proposal |
+| WS | `/agents/holston-agent/:id` | Access JWT, `:id` bound to user | WebSocket chat (Think) |
+| POST | `/messengers/telegram/webhook` | Telegram secret token | Telegram webhook (forwarded to owner instance) |
+| Email | `email()` handler | Sender allowlist + HMAC replies | CF Email Routing → `routeAgentEmail` |
+
+When Cloudflare Access is not configured (`TEAM_DOMAIN`/`POLICY_AUD` unset, e.g. local dev), auth is open and everything binds to the `default` instance. Each authenticated user gets their own agent instance derived from their email; Telegram and inbound email converge on the same instance via `OWNER_EMAIL` / `ALLOWED_EMAIL_SENDERS`.
 
 ## Setup
 
@@ -101,9 +106,11 @@ GitHub Actions deploys on push to `main`. Set these repo secrets:
 
 ## Skills
 
-Skills auto-create when the agent solves complex tasks (5+ tool calls).
-The curator hook uses `generateObject` with Workers AI to extract a structured skill from the session transcript.
-Stored in R2, embedded in Vectorize for semantic retrieval.
+Skills are proposed automatically when the agent solves complex tasks (5+ tool calls).
+The curator hook uses `generateObject` with Workers AI to extract a structured skill from the turn,
+then **stages it as a pending draft** (`skills-pending/` in R2). Approve or reject proposals in the
+Skills panel — only approved skills are embedded in Vectorize and surfaced to the agent.
+In-chat `skill_create`/`skill_patch` tool calls require approval via the tool-approval modal.
 
 Seed skills: `deploy-worker`, `create-skill`, `debug-agent`, `home-automation`
 

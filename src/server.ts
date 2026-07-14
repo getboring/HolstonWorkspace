@@ -1,30 +1,54 @@
-import { Think, skills, type ThinkScheduledTasks, type TurnConfig } from "@cloudflare/think";
 import {
-  normalizeMessengers,
+  Think,
+  skills,
+  type ChatResponseResult,
+  type ThinkScheduledTasks,
+  type TurnConfig,
+  type TurnContext,
+} from "@cloudflare/think";
+import {
   ThinkMessengerStateAgent,
   type ThinkMessengers,
 } from "@cloudflare/think/messengers";
 import telegramMessenger from "@cloudflare/think/messengers/telegram";
-import { getAgentByName, routeAgentRequest } from "agents";
+import { getAgentByName, routeAgentEmail, routeAgentRequest } from "agents";
+import {
+  createSecureReplyEmailResolver,
+  isAutoReplyEmail,
+  type AgentEmail,
+} from "agents/email";
 import bundledSkills from "agents:skills";
+import PostalMime from "postal-mime";
 import { createWorkersAI } from "workers-ai-provider";
-import { createSkillTools } from "./skills/tools";
-import { retrieverHook, nudgerHook, curatorHook } from "./skills/hooks";
+import { agentNameFromEmail, verifyAccessJWT, type AuthUser } from "./auth";
+import { curatorHook, nudgerHook, retrieverHook } from "./skills/hooks";
 import { SkillStore } from "./skills/store";
-import { verifyAccessJWT, agentNameFromEmail } from "./auth";
+import { createSkillTools } from "./skills/tools";
 
 export { ThinkMessengerStateAgent };
 
 const DEFAULT_AGENT = "default";
+const AGENT_CLASS = "HolstonAgent";
+const SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{1,63}$/;
 
 export class HolstonAgent extends Think<Env> {
   chatRecovery = true;
+  // MCP tools are merged into the tool set once connections are ready; wait
+  // (default 10s cap) so the first turn after a wake doesn't miss them.
+  waitForMcpConnections = true;
 
-  override onStart() {
+  #skillStore?: SkillStore;
+
+  override async onStart() {
     if (this.env.MCP_SERVER_URL) {
-      this.mcp.connect(this.env.MCP_SERVER_URL).catch((err: unknown) =>
-        console.error("[holston] MCP connect failed:", err)
-      );
+      try {
+        // addMcpServer is idempotent for a matching name+url: registration and
+        // OAuth tokens persist in SQLite and reconnect on every wake, so this
+        // never accumulates duplicates (unlike raw this.mcp.connect()).
+        await this.addMcpServer("holston-mcp", this.env.MCP_SERVER_URL);
+      } catch (err) {
+        console.error("[holston] MCP server registration failed:", err);
+      }
     }
   }
 
@@ -46,12 +70,7 @@ export class HolstonAgent extends Think<Env> {
   }
 
   override getTools() {
-    const store = new SkillStore(
-      this.env.SKILLS_BUCKET,
-      this.env.SKILLS_INDEX,
-      this.env.AI,
-    );
-    return createSkillTools(store, this);
+    return createSkillTools(this.skillStore(), this);
   }
 
   override getSkills() {
@@ -61,12 +80,18 @@ export class HolstonAgent extends Think<Env> {
     ];
   }
 
-  override getMessengers() {
+  override getMessengers(): ThinkMessengers {
     if (!this.env.TELEGRAM_BOT_TOKEN) {
-      return normalizeMessengers({}) as unknown as ThinkMessengers;
+      return {};
+    }
+    if (!this.env.TELEGRAM_WEBHOOK_SECRET_TOKEN) {
+      console.warn(
+        "[holston] TELEGRAM_WEBHOOK_SECRET_TOKEN missing — Telegram disabled (webhook mode requires a secret token)",
+      );
+      return {};
     }
 
-    return normalizeMessengers({
+    return {
       telegram: telegramMessenger({
         token: this.env.TELEGRAM_BOT_TOKEN,
         userName: this.env.TELEGRAM_BOT_USERNAME ?? "holston_bot",
@@ -74,7 +99,7 @@ export class HolstonAgent extends Think<Env> {
         conversation: "self",
         respondTo: ["direct-message", "mention"],
       }),
-    }) as unknown as ThinkMessengers;
+    };
   }
 
   override getScheduledTasks(): ThinkScheduledTasks {
@@ -92,31 +117,103 @@ export class HolstonAgent extends Think<Env> {
     };
   }
 
-  override async beforeTurn(
-    ctx: Parameters<Think<Env>["beforeTurn"]>[0],
-  ): Promise<void | TurnConfig> {
-    const store = this.skillStore();
-    const result = await retrieverHook(store, ctx, this.getSystemPrompt());
-    if (result && typeof result === "object" && "systemPrompt" in result) {
-      return { systemPrompt: result.systemPrompt } as TurnConfig;
+  override async beforeTurn(ctx: TurnContext): Promise<TurnConfig | void> {
+    const system = await retrieverHook(this.skillStore(), ctx);
+    if (system) {
+      return { system };
     }
   }
 
-  override async onChatResponse(
-    result: Parameters<Think<Env>["onChatResponse"]>[0],
-  ) {
-    const store = this.skillStore();
-    await nudgerHook(store, this as unknown as { sql?: SqlStorage }, result as never);
-    await curatorHook(store, this.env.AI, result as never, this.session as never);
+  override async onChatResponse(result: ChatResponseResult) {
+    nudgerHook(this, result);
+    await curatorHook(this.skillStore(), this.env.AI, result);
+  }
+
+  /**
+   * Incoming email, delivered by routeAgentEmail after the resolver has
+   * authorized the sender. The Message-ID keys idempotency so redelivery
+   * of the same email never produces a duplicate turn.
+   */
+  async onEmail(email: AgentEmail) {
+    const parsed = await PostalMime.parse(await email.getRaw());
+    if (isAutoReplyEmail(parsed.headers)) {
+      console.log(`[holston] Ignoring auto-reply from ${email.from}`);
+      return;
+    }
+
+    const subject = parsed.subject ?? "(no subject)";
+    const body = (parsed.text ?? stripHtml(parsed.html) ?? "").trim();
+
+    await this.submitMessages(
+      [
+        {
+          id: crypto.randomUUID(),
+          role: "user",
+          parts: [
+            {
+              type: "text",
+              text: `[Email from ${email.from}]\nSubject: ${subject}\n\n${body}`,
+            },
+          ],
+        },
+      ],
+      {
+        idempotencyKey: parsed.messageId ?? undefined,
+        metadata: { source: "email", from: email.from, subject },
+      },
+    );
   }
 
   private skillStore(): SkillStore {
-    return new SkillStore(
+    this.#skillStore ??= new SkillStore(
       this.env.SKILLS_BUCKET,
       this.env.SKILLS_INDEX,
       this.env.AI,
     );
+    return this.#skillStore;
   }
+}
+
+function accessConfigured(env: Env): boolean {
+  return Boolean(env.TEAM_DOMAIN && env.POLICY_AUD);
+}
+
+/**
+ * Defense-in-depth behind Cloudflare Access: verify the JWT Access injects.
+ * When Access is not configured (local dev), requests pass with no user and
+ * everything binds to the shared "default" instance.
+ */
+async function authorize(
+  request: Request,
+  env: Env,
+): Promise<{ user: AuthUser | null } | Response> {
+  if (!accessConfigured(env)) {
+    return { user: null };
+  }
+  const user = await verifyAccessJWT(request, env);
+  if (!user) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+  return { user };
+}
+
+function instanceForUser(user: AuthUser | null): string {
+  return user ? agentNameFromEmail(user.email) : DEFAULT_AGENT;
+}
+
+/** The agent instance that owns Telegram and scheduled-messenger traffic. */
+function ownerInstance(env: Env): string {
+  return env.OWNER_EMAIL ? agentNameFromEmail(env.OWNER_EMAIL) : DEFAULT_AGENT;
+}
+
+function allowedEmailSenders(env: Env): Set<string> {
+  const senders = new Set<string>();
+  for (const entry of (env.ALLOWED_EMAIL_SENDERS ?? "").split(",")) {
+    const email = entry.trim().toLowerCase();
+    if (email) senders.add(email);
+  }
+  if (env.OWNER_EMAIL) senders.add(env.OWNER_EMAIL.trim().toLowerCase());
+  return senders;
 }
 
 export default {
@@ -127,47 +224,100 @@ export default {
       return Response.json({
         status: "ok",
         agent: "holston-workspace",
-        version: "0.2.1",
         timestamp: new Date().toISOString(),
-        auth: env.TEAM_DOMAIN ? "cf-access" : "none",
-        telegram: env.TELEGRAM_BOT_TOKEN ? "configured" : "not-configured",
-        skills: "enabled",
       });
     }
 
-    const agentResponse = await routeAgentRequest(request, env);
+    // Every agent route (WebSocket chat, voice, HTTP RPC) requires the Access
+    // JWT, and the URL's instance name must match the authenticated user's own
+    // instance — user A can never open user B's agent.
+    const guardAgentRoute = async (
+      req: Request,
+      lobby: { name: string },
+    ): Promise<Response | undefined> => {
+      const auth = await authorize(req, env);
+      if (auth instanceof Response) return auth;
+      if (lobby.name !== instanceForUser(auth.user)) {
+        return new Response("Forbidden", { status: 403 });
+      }
+      return undefined;
+    };
+
+    const agentResponse = await routeAgentRequest(request, env, {
+      onBeforeConnect: guardAgentRoute,
+      onBeforeRequest: guardAgentRoute,
+    });
     if (agentResponse) {
       return agentResponse;
+    }
+
+    // Messenger webhooks (e.g. Telegram) are handled inside the root Think
+    // agent's onRequest — forward them to the owner's instance. Authenticity
+    // is enforced by the messenger's own verifyWebhook (Telegram secret token).
+    if (url.pathname.startsWith("/messengers/") && request.method === "POST") {
+      const agent = await getAgentByName(env.HolstonAgent, ownerInstance(env));
+      return agent.fetch(request);
     }
 
     if (
       request.method === "POST" &&
       url.pathname === "/setup/telegram-webhook"
     ) {
+      const auth = await authorize(request, env);
+      if (auth instanceof Response) return auth;
       return setupTelegramWebhook(request, env);
     }
 
     if (request.method === "GET" && url.pathname === "/setup/info") {
-      const user = await verifyAccessJWT(request, env);
+      const auth = await authorize(request, env);
+      if (auth instanceof Response) return auth;
       return Response.json({
-        agentName: user ? agentNameFromEmail(user.email) : DEFAULT_AGENT,
+        agentName: instanceForUser(auth.user),
         webhookPath: "/messengers/telegram/webhook",
-        authenticated: !!user,
-        user: user?.email ?? null,
+        authenticated: !!auth.user,
+        user: auth.user?.email ?? null,
       });
     }
 
     if (request.method === "GET" && url.pathname === "/api/skills") {
+      const auth = await authorize(request, env);
+      if (auth instanceof Response) return auth;
       const store = new SkillStore(env.SKILLS_BUCKET, env.SKILLS_INDEX, env.AI);
-      const all = await store.list();
-      return Response.json({ skills: all }, { headers: { "access-control-allow-origin": "*" } });
+      const [approved, pending] = await Promise.all([
+        store.list(),
+        store.listPending(),
+      ]);
+      return Response.json({ skills: approved, pending });
+    }
+
+    const pendingAction = url.pathname.match(
+      /^\/api\/skills\/pending\/([^/]+)\/(approve|reject)$/,
+    );
+    if (request.method === "POST" && pendingAction) {
+      const auth = await authorize(request, env);
+      if (auth instanceof Response) return auth;
+      const name = decodeURIComponent(pendingAction[1] ?? "");
+      if (!SKILL_NAME_PATTERN.test(name)) {
+        return Response.json({ error: "Invalid skill name" }, { status: 400 });
+      }
+      const store = new SkillStore(env.SKILLS_BUCKET, env.SKILLS_INDEX, env.AI);
+      if (pendingAction[2] === "approve") {
+        const approved = await store.approvePending(name);
+        if (!approved) {
+          return Response.json(
+            { error: `No pending skill "${name}"` },
+            { status: 404 },
+          );
+        }
+        return Response.json({ ok: true, skill: approved });
+      }
+      await store.rejectPending(name);
+      return Response.json({ ok: true });
     }
 
     if (url.pathname === "/" || url.pathname === "/index.html") {
-      const user = await verifyAccessJWT(request, env);
-      if (env.TEAM_DOMAIN && !user) {
-        return new Response("Unauthorized", { status: 403 });
-      }
+      const auth = await authorize(request, env);
+      if (auth instanceof Response) return auth;
       return env.ASSETS.fetch(request);
     }
 
@@ -179,30 +329,39 @@ export default {
   },
 
   async email(message: ForwardableEmailMessage, env: Env) {
-    const agentName = agentNameFromEmail(message.from);
-    const agent = await getAgentByName(env.HolstonAgent as never, agentName);
-    const subject = message.headers.get("subject") ?? "(no subject)";
-    const rawEmail = await new Response(message.raw).text();
-    const bodyText = extractEmailBody(rawEmail);
-
-    (agent as never as { submitMessages: (opts: never) => Promise<unknown> }).submitMessages({
-      messages: [
-        {
-          role: "user",
-          parts: [
+    await routeAgentEmail(message, env, {
+      resolver: async (email, env) => {
+        // Replies to signed outbound mail route back via HMAC verification.
+        if (env.EMAIL_SIGNING_SECRET) {
+          const secureResolver = createSecureReplyEmailResolver<Env>(
+            env.EMAIL_SIGNING_SECRET,
             {
-              type: "text",
-              text: `[Email from ${message.from}]\nSubject: ${subject}\n\n${bodyText}`,
+              onInvalidSignature: (rejected, reason) => {
+                console.warn(
+                  `[holston] Email reply signature rejected from ${rejected.from}: ${reason}`,
+                );
+              },
             },
-          ],
-        },
-      ],
-      metadata: {
-        source: "email",
-        from: message.from,
-        subject,
+          );
+          const replyRouting = await secureResolver(email, env);
+          if (replyRouting) return replyRouting;
+        }
+
+        // Fresh inbound mail: only allowlisted senders, each routed to their
+        // own instance (the same instance their Access web session uses).
+        const from = email.from.trim().toLowerCase();
+        if (!allowedEmailSenders(env).has(from)) {
+          return null;
+        }
+        return { agentName: AGENT_CLASS, agentId: agentNameFromEmail(from) };
       },
-    } as never);
+      onNoRoute: (email) => {
+        console.warn(
+          `[holston] Rejecting email from unauthorized sender: ${email.from}`,
+        );
+        email.setReject("Sender not authorized");
+      },
+    });
   },
 } satisfies ExportedHandler<Env>;
 
@@ -240,16 +399,11 @@ async function setupTelegramWebhook(
   );
 }
 
-function extractEmailBody(raw: string): string {
-  const bodyMatch = raw.match(/\r?\n\r?\n([\s\S]*)$/);
-  if (!bodyMatch) return raw;
-  const body = bodyMatch[1] ?? "";
-  if (body.includes("Content-Transfer-Encoding: quoted-printable")) {
-    return body
-      .replace(/=\r?\n/g, "")
-      .replace(/=([0-9A-F]{2})/g, (_, hex: string) =>
-        String.fromCharCode(parseInt(hex, 16)),
-      );
-  }
-  return body.trim();
+function stripHtml(html: string | undefined): string | undefined {
+  if (!html) return undefined;
+  return html
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }

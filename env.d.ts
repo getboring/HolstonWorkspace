@@ -3,11 +3,14 @@
 interface Env {
   AI: Ai;
   ASSETS: Fetcher;
-  HolstonAgent: DurableObjectNamespace;
+  HolstonAgent: DurableObjectNamespace<import("./src/server").HolstonAgent>;
   SKILLS_BUCKET: R2Bucket;
   SKILLS_INDEX: VectorizeIndex;
   TEAM_DOMAIN?: string;
   POLICY_AUD?: string;
+  OWNER_EMAIL?: string;
+  ALLOWED_EMAIL_SENDERS?: string;
+  EMAIL_SIGNING_SECRET?: string;
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_BOT_USERNAME?: string;
   TELEGRAM_WEBHOOK_SECRET_TOKEN?: string;

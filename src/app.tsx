@@ -2,7 +2,7 @@ import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
 import { useVoiceInput } from "@cloudflare/voice/react";
 import { getToolName, isToolUIPart, type UIMessage } from "ai";
-import { useState, useEffect, useRef, type ReactNode } from "react";
+import { useState, useEffect, type ReactNode } from "react";
 import { ChatView } from "./components/ChatView";
 import { SessionList } from "./components/SessionList";
 import { SkillsPanel } from "./components/SkillsPanel";
@@ -11,8 +11,6 @@ import { ToolApproval } from "./components/ToolApproval";
 import { PoweredBy } from "./components/PoweredBy";
 
 export function App() {
-  const [activeTab, setActiveTab] = useState<"chat" | "skills" | "settings">("chat");
-  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [dark, setDark] = useState(() => {
     const saved = typeof localStorage !== "undefined" ? localStorage.getItem("theme") : null;
     return saved === "dark" || (!saved && typeof window !== "undefined" && window.matchMedia("(prefers-color-scheme: dark)").matches);
@@ -25,13 +23,71 @@ export function App() {
     try { localStorage.setItem("theme", mode); } catch {}
   }, [dark]);
 
+  // The server derives the instance name from the Access JWT, so each user
+  // lands on their own agent. Falls back to "default" for local dev.
+  const [agentName, setAgentName] = useState<string | null>(null);
+  const [infoError, setInfoError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/setup/info")
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json() as Promise<{ agentName: string }>;
+      })
+      .then((info) => {
+        if (!cancelled) setAgentName(info.agentName || "default");
+      })
+      .catch((err) => {
+        if (!cancelled) setInfoError(err instanceof Error ? err.message : "Failed to load agent info");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (infoError) {
+    return (
+      <div className="holston-app" data-mode={dark ? "dark" : "light"}>
+        <div className="holston-main">
+          <p className="holston-error">Could not connect to your agent ({infoError}). Are you signed in?</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!agentName) {
+    return (
+      <div className="holston-app" data-mode={dark ? "dark" : "light"}>
+        <div className="holston-main">
+          <p className="holston-loading">Connecting to your agent...</p>
+        </div>
+      </div>
+    );
+  }
+
+  return <Workspace agentName={agentName} dark={dark} setDark={setDark} />;
+}
+
+function Workspace({
+  agentName,
+  dark,
+  setDark,
+}: {
+  agentName: string;
+  dark: boolean;
+  setDark: (dark: boolean) => void;
+}) {
+  const [activeTab, setActiveTab] = useState<"chat" | "skills" | "settings">("chat");
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+
   const agent = useAgent({
     agent: "HolstonAgent",
-    name: "default",
+    name: agentName,
     onOpen: () => console.log("[holston] WebSocket connected"),
     onClose: () => console.log("[holston] WebSocket disconnected"),
     onError: (error: Event) => console.error("[holston] WebSocket error:", error),
-  } as never);
+  });
 
   const {
     messages,
@@ -39,21 +95,12 @@ export function App() {
     stop,
     sendMessage,
     addToolApprovalResponse,
-  } = useAgentChat({
-    agent,
-  } as never);
+  } = useAgentChat({ agent });
 
   const isLoading = status === "streaming" || status === "submitted";
 
-  const { transcript, interimTranscript, isListening, start, stop: stopVoice } =
-    useVoiceInput({ agent: "HolstonAgent" } as never);
-
-  const transcriptRef = useRef("");
-  useEffect(() => {
-    if (transcript && transcript !== transcriptRef.current) {
-      transcriptRef.current = transcript;
-    }
-  }, [transcript]);
+  const { interimTranscript, isListening, start, stop: stopVoice } =
+    useVoiceInput({ agent: "HolstonAgent", name: agentName });
 
   const pendingApproval = messages.find((m: UIMessage) =>
     m.parts?.some((p) => {
@@ -70,7 +117,7 @@ export function App() {
   const pendingApprovalId = pendingPart && "approval" in pendingPart
     ? (pendingPart as { approval?: { id?: string } }).approval?.id
     : undefined;
-  const pendingToolName = pendingPart ? getToolName(pendingPart as never) : undefined;
+  const pendingToolName = pendingPart && isToolUIPart(pendingPart) ? getToolName(pendingPart) : undefined;
   const pendingToolInput = pendingPart && "input" in pendingPart
     ? (pendingPart as { input?: unknown }).input
     : undefined;
@@ -114,7 +161,7 @@ export function App() {
           <ChatView
             messages={messages as UIMessage[]}
             stop={stop}
-            sendMessage={sendMessage as never}
+            sendMessage={sendMessage}
             isLoading={isLoading}
             isListening={isListening}
             interimTranscript={interimTranscript}
@@ -130,8 +177,8 @@ export function App() {
           <ToolApproval
             toolName={pendingToolName ?? "unknown"}
             input={pendingToolInput}
-            onApprove={() => addToolApprovalResponse({ id: pendingApprovalId, approved: true } as never)}
-            onReject={() => addToolApprovalResponse({ id: pendingApprovalId, approved: false } as never)}
+            onApprove={() => addToolApprovalResponse({ id: pendingApprovalId, approved: true })}
+            onReject={() => addToolApprovalResponse({ id: pendingApprovalId, approved: false })}
           />
         )}
 

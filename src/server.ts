@@ -127,7 +127,7 @@ export default {
       return Response.json({
         status: "ok",
         agent: "holston-workspace",
-        version: "0.2.0",
+        version: "0.2.1",
         timestamp: new Date().toISOString(),
         auth: env.TEAM_DOMAIN ? "cf-access" : "none",
         telegram: env.TELEGRAM_BOT_TOKEN ? "configured" : "not-configured",

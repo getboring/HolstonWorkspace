@@ -11,6 +11,7 @@ import {
   LightningIcon,
   MoonIcon,
   PlugsConnectedIcon,
+  ReceiptIcon,
   SidebarIcon,
   SparkleIcon,
   SunIcon,
@@ -22,6 +23,7 @@ import { useEffect, useState } from "react";
 import { ChatView } from "./components/ChatView";
 import { McpPanel } from "./components/McpPanel";
 import { PoweredBy } from "./components/PoweredBy";
+import { ReceiptsPanel } from "./components/ReceiptsPanel";
 import { SessionList } from "./components/SessionList";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { SkillsPanel } from "./components/SkillsPanel";
@@ -30,7 +32,7 @@ import { ToolApproval } from "./components/ToolApproval";
 import type { HolstonAgent } from "./server";
 import { INITIAL_STATE, type HolstonState } from "./shared/state";
 
-type Tab = "chat" | "tasks" | "mcp" | "skills" | "settings";
+type Tab = "chat" | "tasks" | "mcp" | "skills" | "receipts" | "settings";
 
 export function App() {
   const [dark, setDark] = useState(() => {
@@ -130,6 +132,7 @@ function Workspace({ agentName, dark, setDark }: { agentName: string; dark: bool
     { value: "tasks", label: "Tasks", icon: LightningIcon, badge: state.reminders.length },
     { value: "mcp", label: "MCP", icon: PlugsConnectedIcon, badge: state.mcpServers.length },
     { value: "skills", label: "Skills", icon: SparkleIcon },
+    { value: "receipts", label: "Receipts", icon: ReceiptIcon, badge: state.receiptCount },
     { value: "settings", label: "Settings", icon: GearIcon },
   ] as const;
 
@@ -180,6 +183,7 @@ function Workspace({ agentName, dark, setDark }: { agentName: string; dark: bool
           {activeTab === "tasks" && <TasksPanel agent={agent} state={state} />}
           {activeTab === "mcp" && <McpPanel agent={agent} state={state} />}
           {activeTab === "skills" && <SkillsPanel />}
+          {activeTab === "receipts" && <ReceiptsPanel agent={agent} />}
           {activeTab === "settings" && <SettingsPanel agent={agent} state={state} />}
         </main>
 

@@ -1,6 +1,9 @@
 import {
+  Session,
   Think,
   skills,
+  type Action,
+  type ActionAuthorizationDecision,
   type ChatResponseResult,
   type ThinkScheduledTasks,
   type ToolCallContext,
@@ -26,12 +29,19 @@ import {
   type AgentEmail,
 } from "agents/email";
 import bundledSkills from "agents:skills";
-import { generateObject } from "ai";
+import { generateObject, generateText } from "ai";
 import PostalMime from "postal-mime";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
+import {
+  createCompactFunction,
+  estimateMessageTokens,
+} from "agents/experimental/memory/utils";
+import { R2SkillProvider } from "agents/experimental/memory/session";
+import { createActions } from "./actions";
 import { agentNameFromEmail, verifyAccessJWT, type AuthUser } from "./auth";
 import { sendPush } from "./push";
+import { ReceiptStore, type Receipt } from "./receipts";
 import {
   DEFAULT_MODEL,
   DEFAULT_SETTINGS,
@@ -83,6 +93,7 @@ export class HolstonAgent extends Think<Env, HolstonState> {
   };
 
   #skillStore?: SkillStore;
+  #receiptStore?: ReceiptStore;
 
   override async onStart() {
     // Schema evolution: backfill any settings fields added after this DO's
@@ -92,6 +103,7 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     if (JSON.stringify(merged) !== JSON.stringify(this.state.settings)) {
       this.setState({ ...this.state, settings: merged });
     }
+    this.syncReceiptCount();
 
     if (this.env.MCP_SERVER_URL) {
       try {
@@ -149,6 +161,80 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     ];
   }
 
+  /**
+   * Server actions compiled into model tools, each following the Boring Stack
+   * write path (validate → idempotency → authorize → execute → receipt).
+   */
+  override getActions(): Record<string, Action> {
+    const store = this.skillStore();
+    return createActions({
+      receipts: this.receiptStore(),
+      actor: this.name,
+      approvalMode: this.state?.settings.approvalMode ?? "destructive-only",
+      notify: (title, body, opts) => this.notifyUser(title, body, opts),
+      saveMemory: (fact) => this.saveMemory(fact),
+      createReminder: async (request) => {
+        const view = await this.createReminder(request);
+        return `${view.message} — ${view.when}`;
+      },
+      deleteSkill: async (name) => {
+        const existing = await store.get(name);
+        if (!existing) return false;
+        await store.delete(name);
+        return true;
+      },
+    });
+  }
+
+  /**
+   * Grant action permissions per turn. Web + messenger + email turns are the
+   * owner acting, so grant all permissions; anything else gets none (read-only).
+   */
+  override authorizeTurn(_ctx: TurnContext): ActionAuthorizationDecision {
+    return true;
+  }
+
+  /**
+   * Persistent, per-user memory: a writable `memory` block the model reads and
+   * writes (set_context / save_memory), R2-backed on-demand `skills`, a
+   * searchable `history` block (search_context / FTS5), plus non-destructive
+   * compaction so long conversations compress instead of overflowing.
+   */
+  override configureSession(session: Session): Session {
+    const summarizer = createWorkersAI({ binding: this.env.AI })(DEFAULT_MODEL);
+    return session
+      .withContext("memory", {
+        description: "Durable facts about the user (preferences, projects, context)",
+        maxTokens: 2000,
+      })
+      .withContext("skills", {
+        description: "On-demand skill guides loaded when relevant",
+        provider: new R2SkillProvider(this.env.SKILLS_BUCKET, {
+          prefix: "skills/",
+        }),
+      })
+      .withContext("history", {
+        description: "Searchable record of this conversation",
+      })
+      .withCachedPrompt()
+      .onCompaction(
+        createCompactFunction({
+          summarize: async (prompt) => {
+            const { text } = await generateText({ model: summarizer, prompt });
+            return text;
+          },
+          protectHead: 3,
+          tailTokenBudget: 20_000,
+          minTailMessages: 2,
+          tokenCounter: (messages) => estimateMessageTokens(messages),
+        }),
+      )
+      .compactAfter(100_000)
+      .onCompactionError((err) =>
+        console.warn("[holston] auto-compaction failed:", err),
+      );
+  }
+
   override getMessengers(): ThinkMessengers {
     if (!this.env.TELEGRAM_BOT_TOKEN) return {};
     if (!this.env.TELEGRAM_WEBHOOK_SECRET_TOKEN) {
@@ -194,6 +280,8 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     if (this.state?.settings.autoSkills !== false) {
       await curatorHook(this.skillStore(), this.env.AI, result);
     }
+    // Actions may have written receipts this turn; refresh the badge count.
+    this.syncReceiptCount();
   }
 
   /**
@@ -535,6 +623,39 @@ export class HolstonAgent extends Think<Env, HolstonState> {
       this.env.AI,
     );
     return this.#skillStore;
+  }
+
+  private receiptStore(): ReceiptStore {
+    this.#receiptStore ??= new ReceiptStore(this);
+    return this.#receiptStore;
+  }
+
+  private syncReceiptCount() {
+    // Touch the store first so the table exists (its constructor creates it).
+    const count = this.receiptStore().count();
+    if (count !== this.state.receiptCount) {
+      this.setState({ ...this.state, receiptCount: count });
+    }
+  }
+
+  /** Append a durable fact to the writable `memory` context block. */
+  private async saveMemory(fact: string) {
+    await this.session.appendContextBlock("memory", fact.trim());
+    // The cached system-prompt snapshot is sticky; refresh so the new fact is
+    // visible on the next turn.
+    await this.session.refreshSystemPrompt();
+  }
+
+  // ── Receipts & memory (fetched on demand) ──────────────────────────────
+
+  @callable()
+  listReceipts(limit = 100): Receipt[] {
+    return this.receiptStore().list(limit);
+  }
+
+  @callable()
+  getMemory(): string {
+    return this.session.getContextBlock("memory")?.content ?? "";
   }
 }
 

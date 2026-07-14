@@ -103,11 +103,24 @@ export interface McpServerView {
   toolCount: number;
 }
 
+/** A row from the immutable action-receipts ledger (fetched on demand). */
+export interface ReceiptView {
+  id: string;
+  action: string;
+  idempotencyKey: string | null;
+  input: unknown;
+  output: unknown;
+  actor: string;
+  createdAt: string;
+}
+
 export interface HolstonState {
   settings: HolstonSettings;
   reminders: ReminderView[];
   mcpServers: McpServerView[];
   pushSubscriptions: PushSubscriptionRecord[];
+  /** Count of receipts written, so the UI can badge the Receipts tab. */
+  receiptCount: number;
   /** Bumped whenever the agent wants clients to refetch derived data. */
   revision: number;
 }
@@ -117,6 +130,7 @@ export const INITIAL_STATE: HolstonState = {
   reminders: [],
   mcpServers: [],
   pushSubscriptions: [],
+  receiptCount: 0,
   revision: 0,
 };
 

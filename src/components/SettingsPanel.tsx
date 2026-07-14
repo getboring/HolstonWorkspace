@@ -6,6 +6,7 @@ import { Field } from "@cloudflare/kumo/components/field";
 import { Button } from "@cloudflare/kumo/components/button";
 import { useEffect, useState } from "react";
 import type { HolstonAgentConnection } from "../app";
+import { MemoryCard } from "./MemoryCard";
 import {
   TIMEZONES,
   WORKERS_AI_MODELS,
@@ -118,6 +119,8 @@ export function SettingsPanel({
             </Button>
           </div>
         </Surface>
+
+        <MemoryCard agent={agent} />
 
         <Surface className="p-4 rounded-xl border border-kumo-hairline">
           <Text variant="heading3" as="h3">About</Text>

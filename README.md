@@ -12,7 +12,9 @@
 - **Client-managed MCP** (add/remove/authenticate MCP servers from the UI, live tool counts and OAuth handoff — no more single hardcoded env var)
 - **Reminders & recurring tasks** (natural-language scheduling: "every weekday at 9am"; fires across push, Telegram, email, and the chat)
 - **Web Push** (VAPID; reach the user with reminders and proactive messages even when the tab is closed)
-- **Synced settings** (model, auto-skills, tool-approval mode, custom instructions — stored on the agent, drive every turn)
+- **Actions with receipts** (gated server actions — send_message, set_reminder, save_memory, remove_skill — following the write-path: validate → idempotency → authorize → execute → immutable receipt; every one auditable in the Receipts tab)
+- **Persistent memory** (durable facts the model remembers across conversations via a writable context block, plus non-destructive compaction and FTS5 history search)
+- **Synced settings** (model, auto-skills, tool-approval mode, timezone, custom instructions — stored on the agent, drive every turn)
 - **Multi-platform messaging** (Telegram, Email in + out, WebSocket chat)
 - **Scheduled tasks** (declarative cron DSL: daily digest, weekly skill review)
 - **Workspace tools** (bash, read, write, edit, grep, find, list, delete)
@@ -60,6 +62,8 @@ The UI drives the agent through typed RPC (`agent.stub.*`), not env vars or loca
 | `connectMcpServer(name, url)` / `disconnectMcpServer(id)` / `refreshMcpServers()` | Manage MCP servers; OAuth returns an `authUrl` |
 | `createReminder(text)` / `listReminders()` / `cancelReminder(id)` | Natural-language scheduling |
 | `getVapidPublicKey()` / `subscribePush(sub)` / `unsubscribePush(endpoint)` | Web Push subscription |
+| `listReceipts(limit)` | Immutable action-receipt ledger (Receipts tab) |
+| `getMemory()` | The durable `memory` context block (Memory card) |
 
 ## Endpoints
 

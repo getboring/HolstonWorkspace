@@ -13,7 +13,9 @@ updated_at: 2026-07-13T22:00:00Z
 
 ## Setup
 
-1. Connect to the Home Assistant MCP server via `this.mcp.connect(url)` in the agent's `onStart()`.
+1. Connect to the Home Assistant MCP server from the **MCP** tab in the dashboard
+   (Name + Server URL), or programmatically via `this.addMcpServer("home-assistant", url)`
+   in `onStart()`. Registration persists in SQLite and reconnects on wake.
 2. The MCP server exposes tools: `call_service`, `get_state`, `set_state`, `trigger_automation`.
 3. Use entity IDs like `light.living_room`, `climate.thermostat`, `sensor.temperature`.
 

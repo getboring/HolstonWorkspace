@@ -3,6 +3,8 @@ import {
   skills,
   type ChatResponseResult,
   type ThinkScheduledTasks,
+  type ToolCallContext,
+  type ToolCallDecision,
   type TurnConfig,
   type TurnContext,
 } from "@cloudflare/think";
@@ -32,9 +34,12 @@ import { agentNameFromEmail, verifyAccessJWT, type AuthUser } from "./auth";
 import { sendPush } from "./push";
 import {
   DEFAULT_MODEL,
+  DEFAULT_SETTINGS,
+  DEFAULT_TIMEZONE,
   INITIAL_STATE,
   isApprovalMode,
   isValidModel,
+  isValidTimezone,
   type HolstonSettings,
   type HolstonState,
   type McpServerView,
@@ -52,14 +57,42 @@ const AGENT_CLASS = "HolstonAgent";
 const SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{1,63}$/;
 const REMINDER_CALLBACK = "runReminder";
 
+// Built-in workspace tools that can mutate the workspace or run code. Gated by
+// approvalMode; read-only tools (read/list/find/grep) are never gated.
+const DESTRUCTIVE_TOOLS = new Set(["bash", "write", "edit", "delete"]);
+
 export class HolstonAgent extends Think<Env, HolstonState> {
   chatRecovery = true;
   waitForMcpConnections = true;
   initialState: HolstonState = INITIAL_STATE;
 
+  // Compact-and-retry when a turn overflows the model context instead of
+  // hard-failing; abort a stalled stream after 45s into recovery.
+  contextOverflow = { reactive: true, maxRetries: 1 };
+  chatStreamStallTimeoutMs = 45_000;
+
+  // Read-only, allowlisted HTTP fetch so "research" in the system prompt is real
+  // (backs it without needing an MCP server). GET-only, bounded, audited.
+  fetchTools = {
+    allowlist: [
+      "https://developers.cloudflare.com/**",
+      "https://*.wikipedia.org/**",
+      "https://raw.githubusercontent.com/**",
+      "https://api.github.com/**",
+    ],
+  };
+
   #skillStore?: SkillStore;
 
   override async onStart() {
+    // Schema evolution: backfill any settings fields added after this DO's
+    // state was first persisted (e.g. `timezone`), so older instances get new
+    // defaults instead of `undefined`.
+    const merged = { ...DEFAULT_SETTINGS, ...this.state.settings };
+    if (JSON.stringify(merged) !== JSON.stringify(this.state.settings)) {
+      this.setState({ ...this.state, settings: merged });
+    }
+
     if (this.env.MCP_SERVER_URL) {
       try {
         await this.addMcpServer("holston-mcp", this.env.MCP_SERVER_URL);
@@ -84,6 +117,10 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     return createWorkersAI({ binding: this.env.AI })(model);
   }
 
+  override getDefaultTimezone() {
+    return this.state?.settings.timezone ?? DEFAULT_TIMEZONE;
+  }
+
   override getSystemPrompt() {
     const base = [
       "You are Holston, a cloud-native AI agent running on Cloudflare Workers.",
@@ -99,7 +136,10 @@ export class HolstonAgent extends Think<Env, HolstonState> {
   }
 
   override getTools() {
-    return createSkillTools(this.skillStore(), this);
+    // Skill-write tools honor approvalMode: gated in always/destructive-only,
+    // ungated in never. (Skill writes are treated as destructive.)
+    const gated = this.state?.settings.approvalMode !== "never";
+    return createSkillTools(this.skillStore(), this, gated);
   }
 
   override getSkills() {
@@ -156,6 +196,31 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     }
   }
 
+  /**
+   * Enforce approvalMode for built-in workspace tools. beforeToolCall can only
+   * allow/block/substitute (it can't raise the client approval modal — that's
+   * driven by a tool's needsApproval), so:
+   *   - never / destructive-only: built-in tools run (destructive-only relies on
+   *     the model + skill-tool modals; built-in file writes are already sandboxed
+   *     to the DO's own workspace, not the user's machine).
+   *   - always: block destructive built-in tools so nothing mutates without an
+   *     explicit human step; the model surfaces the reason and can ask first.
+   */
+  override beforeToolCall(
+    ctx: ToolCallContext,
+  ): ToolCallDecision | void {
+    const mode = this.state?.settings.approvalMode ?? "destructive-only";
+    if (mode !== "always") return;
+    if (DESTRUCTIVE_TOOLS.has(ctx.toolName)) {
+      return {
+        action: "block",
+        reason:
+          `Approval mode is "always": the ${ctx.toolName} tool is blocked. ` +
+          "Explain what you would run and ask the user to confirm or lower the approval setting.",
+      };
+    }
+  }
+
   // ── Settings (synced state) ────────────────────────────────────────────
 
   @callable()
@@ -175,6 +240,12 @@ export class HolstonAgent extends Think<Env, HolstonState> {
         throw new Error("Invalid approval mode");
       }
       next.approvalMode = patch.approvalMode;
+    }
+    if (patch.timezone !== undefined) {
+      if (!isValidTimezone(patch.timezone)) {
+        throw new Error("Invalid timezone");
+      }
+      next.timezone = patch.timezone;
     }
     if (patch.customInstructions !== undefined) {
       next.customInstructions = String(patch.customInstructions).slice(0, 4000);
@@ -225,19 +296,20 @@ export class HolstonAgent extends Think<Env, HolstonState> {
    */
   @callable()
   async createReminder(request: string): Promise<ReminderView> {
-    const now = new Date();
+    const tz = this.getDefaultTimezone();
+    const nowLocal = formatLocal(new Date(), tz);
     const model = createWorkersAI({ binding: this.env.AI })(DEFAULT_MODEL);
     const { object } = await generateObject({
       model,
       schema: reminderParseSchema,
       system: [
-        `The current date and time is ${now.toISOString()} (UTC).`,
-        "Extract a reminder from the user's message.",
+        `The user's current local date and time is ${nowLocal} (timezone ${tz}).`,
+        "Extract a reminder from the user's message. Interpret all times as the user's LOCAL time.",
         "- message: what to be reminded about (imperative, no time words).",
         '- kind: "once" for a single time, "recurring" for anything repeating.',
-        '- For "once": set datetime to a full ISO 8601 UTC timestamp in the future.',
-        '- For "recurring": set cron to a standard 5-field cron expression (UTC).',
-        "Resolve relative times (tomorrow, in 2 hours, next Monday) against the current time above.",
+        '- For "once": set datetime to a LOCAL wall-clock timestamp "YYYY-MM-DDTHH:MM:SS" (NO timezone/Z suffix).',
+        '- For "recurring": set cron to a 5-field cron expression in LOCAL time (minute hour day month weekday).',
+        "Resolve relative times (tomorrow, in 2 hours, next Monday) against the current local time above.",
       ].join("\n"),
       prompt: request,
     });
@@ -246,15 +318,23 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     let schedule: Schedule<{ message: string }>;
 
     if (object.kind === "once" && object.datetime.trim()) {
-      const date = new Date(object.datetime);
-      if (Number.isNaN(date.getTime()) || date.getTime() <= Date.now()) {
+      // Convert the local wall-clock time (in the user's zone) to a real instant.
+      const date = localWallClockToUtc(object.datetime, tz);
+      if (!date || date.getTime() <= Date.now()) {
         throw new Error(
           "That time is in the past or unclear. Try 'tomorrow at 3pm' or 'in 2 hours'.",
         );
       }
       schedule = await this.schedule(date, REMINDER_CALLBACK, { message });
     } else if (object.kind === "recurring" && object.cron.trim()) {
-      schedule = await this.schedule(object.cron, REMINDER_CALLBACK, { message });
+      // Agent.schedule runs cron in UTC; shift the local cron hour by the zone offset.
+      const cron = shiftCronToUtc(object.cron, tz);
+      if (!cron) {
+        throw new Error(
+          "Could not parse that recurring time. Try 'every weekday at 9am'.",
+        );
+      }
+      schedule = await this.schedule(cron, REMINDER_CALLBACK, { message });
     } else {
       throw new Error(
         "Could not parse a time from that request. Try 'tomorrow at 3pm' or 'every weekday at 9am'.",
@@ -262,7 +342,7 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     }
 
     await this.syncReminders();
-    return toReminderView(schedule);
+    return toReminderView(schedule, tz);
   }
 
   @callable()
@@ -341,37 +421,52 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     const subject = parsed.subject ?? "(no subject)";
     const body = (parsed.text ?? stripHtml(parsed.html) ?? "").trim();
 
-    await this.submitMessages(
-      [
-        {
-          id: crypto.randomUUID(),
-          role: "user",
-          parts: [
-            {
-              type: "text",
-              text: `[Email from ${email.from}]\nSubject: ${subject}\n\n${body}`,
-            },
-          ],
-        },
-      ],
+    // Process as a blocking turn so we can reply with the model's answer.
+    const result = await this.saveMessages([
       {
-        idempotencyKey: parsed.messageId ?? undefined,
-        metadata: { source: "email", from: email.from, subject },
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [
+          {
+            type: "text",
+            text: `[Email from ${email.from}]\nSubject: ${subject}\n\n${body}`,
+          },
+        ],
       },
-    );
+    ]);
+
+    // Reply with the assistant's answer, when available and configured.
+    if (result.status === "completed") {
+      const answer = lastAssistantText(this.messages);
+      if (answer && this.env.EMAIL) {
+        try {
+          await this.replyToEmail(email, {
+            fromName: "Holston",
+            subject: subject.startsWith("Re:") ? subject : `Re: ${subject}`,
+            body: answer,
+            secret: this.env.EMAIL_SIGNING_SECRET ?? null,
+          });
+        } catch (err) {
+          console.error("[holston] email reply failed:", err);
+        }
+      }
+    }
   }
 
   // ── Internal helpers ───────────────────────────────────────────────────
 
   /**
-   * Fan a proactive message out to every channel: push (offline-capable),
-   * connected web clients (broadcast), and email if an owner address is set.
+   * Fan a proactive message out to every configured channel: push
+   * (offline-capable), connected web clients (broadcast), and email to the
+   * owner when the send_email binding + OWNER_EMAIL are set. Best-effort — a
+   * failure on one channel never blocks the others.
    */
   private async notifyUser(
     title: string,
     body: string,
     opts: { url?: string } = {},
   ) {
+    // Push
     const { deadEndpoints } = await sendPush(
       this.env,
       this.state.pushSubscriptions,
@@ -385,9 +480,27 @@ export class HolstonAgent extends Think<Env, HolstonState> {
         ),
       });
     }
+
+    // Connected web clients
     this.broadcast(
       JSON.stringify({ type: "notification", title, body, at: Date.now() }),
     );
+
+    // Email (owner only)
+    if (this.env.EMAIL && this.env.OWNER_EMAIL) {
+      try {
+        await this.sendEmail({
+          binding: this.env.EMAIL,
+          to: this.env.OWNER_EMAIL,
+          from: this.env.OWNER_EMAIL,
+          subject: `[Holston] ${title}`,
+          text: body,
+          secret: this.env.EMAIL_SIGNING_SECRET,
+        });
+      } catch (err) {
+        console.error("[holston] notify email failed:", err);
+      }
+    }
   }
 
   private async syncMcpState() {
@@ -407,10 +520,11 @@ export class HolstonAgent extends Think<Env, HolstonState> {
   }
 
   private async syncReminders() {
+    const tz = this.getDefaultTimezone();
     const schedules = await this.listSchedules();
     const views = schedules
       .filter((s) => s.callback === REMINDER_CALLBACK)
-      .map((s) => toReminderView(s as Schedule<{ message: string }>));
+      .map((s) => toReminderView(s as Schedule<{ message: string }>, tz));
     this.setState({ ...this.state, reminders: views });
   }
 
@@ -437,16 +551,93 @@ const reminderParseSchema = z.object({
   datetime: z
     .string()
     .describe(
-      'When kind is "once": full ISO 8601 UTC timestamp in the future, e.g. "2026-07-15T19:00:00Z". When kind is "recurring": empty string "".',
+      'When kind is "once": LOCAL wall-clock timestamp "YYYY-MM-DDTHH:MM:SS" with NO timezone suffix, e.g. "2026-07-15T15:00:00". When kind is "recurring": empty string "".',
     ),
   cron: z
     .string()
     .describe(
-      'When kind is "recurring": 5-field UTC cron expression, e.g. "0 14 * * 1-5". When kind is "once": empty string "".',
+      'When kind is "recurring": 5-field LOCAL cron expression, e.g. "0 9 * * 1-5". When kind is "once": empty string "".',
     ),
 });
 
-function toReminderView(schedule: Schedule<{ message: string }>): ReminderView {
+/** Extract the text of the most recent assistant message (for email replies). */
+function lastAssistantText(
+  messages: Array<{ role: string; parts?: Array<{ type: string; text?: string }> }>,
+): string | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m?.role !== "assistant") continue;
+    const text = (m.parts ?? [])
+      .filter((p) => p.type === "text")
+      .map((p) => p.text)
+      .join("\n")
+      .trim();
+    return text || undefined;
+  }
+  return undefined;
+}
+
+/** Format a Date as a readable local time string in the given IANA zone. */
+function formatLocal(date: Date, timeZone: string): string {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    dateStyle: "full",
+    timeStyle: "short",
+  }).format(date);
+}
+
+/**
+ * The offset (minutes) of `timeZone` from UTC at instant `date`.
+ * Positive means the zone is behind UTC (e.g. America/New_York = 240/300).
+ */
+function tzOffsetMinutes(date: Date, timeZone: string): number {
+  const local = new Date(date.toLocaleString("en-US", { timeZone }));
+  const utc = new Date(date.toLocaleString("en-US", { timeZone: "UTC" }));
+  return Math.round((utc.getTime() - local.getTime()) / 60000);
+}
+
+/**
+ * Interpret "YYYY-MM-DDTHH:MM:SS" as wall-clock time in `timeZone` and return
+ * the real UTC instant. Returns null if unparseable.
+ */
+function localWallClockToUtc(local: string, timeZone: string): Date | null {
+  const m = local
+    .trim()
+    .match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?/);
+  if (!m) return null;
+  const [, y, mo, d, h, mi, s] = m;
+  if (!y || !mo || !d || !h || !mi) return null;
+  // Provisional UTC guess, then correct by the zone's offset at that instant.
+  const guess = Date.UTC(+y, +mo - 1, +d, +h, +mi, s ? +s : 0);
+  const offset = tzOffsetMinutes(new Date(guess), timeZone);
+  const result = new Date(guess + offset * 60000);
+  return Number.isNaN(result.getTime()) ? null : result;
+}
+
+/**
+ * Shift a local 5-field cron expression's hour into UTC by the zone's current
+ * offset (whole-hour zones only; DST shifts by ≤1h are acceptable for reminders).
+ * Returns null if the expression isn't a standard 5-field cron.
+ */
+function shiftCronToUtc(cron: string, timeZone: string): string | null {
+  const parts = cron.trim().split(/\s+/);
+  if (parts.length !== 5) return null;
+  const [min, hour, dom, mon, dow] = parts as [string, string, string, string, string];
+  if (hour === "*" || hour.includes(",") || hour.includes("/") || hour.includes("-")) {
+    // Non-simple hour field: leave as-is (best effort).
+    return cron.trim();
+  }
+  const h = Number(hour);
+  if (!Number.isInteger(h)) return null;
+  const offsetHours = tzOffsetMinutes(new Date(), timeZone) / 60;
+  const utcHour = ((h + offsetHours) % 24 + 24) % 24;
+  return `${min} ${Math.round(utcHour)} ${dom} ${mon} ${dow}`;
+}
+
+function toReminderView(
+  schedule: Schedule<{ message: string }>,
+  timeZone: string,
+): ReminderView {
   const message = schedule.payload?.message ?? "(reminder)";
   const recurring = schedule.type === "cron" || schedule.type === "interval";
   const nextRun = "time" in schedule ? schedule.time * 1000 : null;
@@ -459,7 +650,15 @@ function toReminderView(schedule: Schedule<{ message: string }>): ReminderView {
       when = `every ${schedule.intervalSeconds}s`;
       break;
     default:
-      when = nextRun ? new Date(nextRun).toLocaleString() : "scheduled";
+      // Render in the user's timezone, not the server/browser zone, so the
+      // displayed time matches what the user asked for.
+      when = nextRun
+        ? new Intl.DateTimeFormat("en-US", {
+            timeZone,
+            dateStyle: "medium",
+            timeStyle: "short",
+          }).format(new Date(nextRun))
+        : "scheduled";
   }
   return { id: schedule.id, message, when, nextRun, kind: schedule.type, recurring };
 }

@@ -26,16 +26,46 @@ export interface HolstonSettings {
   autoSkills: boolean;
   /** Governs the tool-approval gate surfaced to the user. */
   approvalMode: ApprovalMode;
+  /** IANA timezone for reminders and wall-clock schedules (e.g. America/New_York). */
+  timezone: string;
   /** Extra instruction appended to the system prompt (user-editable persona). */
   customInstructions: string;
 }
+
+export const DEFAULT_TIMEZONE = "America/New_York";
 
 export const DEFAULT_SETTINGS: HolstonSettings = {
   model: DEFAULT_MODEL,
   autoSkills: true,
   approvalMode: "destructive-only",
+  timezone: DEFAULT_TIMEZONE,
   customInstructions: "",
 };
+
+/** Common IANA timezones offered in the Settings UI. */
+export const TIMEZONES = [
+  "America/New_York",
+  "America/Chicago",
+  "America/Denver",
+  "America/Los_Angeles",
+  "America/Anchorage",
+  "Pacific/Honolulu",
+  "UTC",
+  "Europe/London",
+  "Europe/Paris",
+  "Asia/Tokyo",
+  "Australia/Sydney",
+] as const;
+
+/** Validate an IANA timezone using the Intl API (avoids a hardcoded allowlist). */
+export function isValidTimezone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /** A Web Push subscription (PushSubscription.toJSON() shape). */
 export interface PushSubscriptionRecord {

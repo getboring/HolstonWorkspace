@@ -43,6 +43,9 @@
       "index_name": "holston-skills-v1"
     }
   ],
+  // Outbound email (agent replies / notifications). Requires a verified
+  // sender in Cloudflare Email Routing. Uncomment once configured.
+  // "send_email": [{ "name": "EMAIL", "destination_address": "you@example.com" }],
   "vars": {
     "TEAM_DOMAIN": "",
     "POLICY_AUD": "",
@@ -50,4 +53,7 @@
     "OWNER_EMAIL": "",
     "ALLOWED_EMAIL_SENDERS": ""
   }
+  // Secrets (set via `wrangler secret put`): EMAIL_SIGNING_SECRET,
+  // VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, VAPID_SUBJECT,
+  // TELEGRAM_BOT_TOKEN, TELEGRAM_BOT_USERNAME, TELEGRAM_WEBHOOK_SECRET_TOKEN.
 }

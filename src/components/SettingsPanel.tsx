@@ -1,78 +1,117 @@
-import { useState } from "react";
+import { Select } from "@cloudflare/kumo/components/select";
+import { Surface } from "@cloudflare/kumo/components/surface";
+import { Switch } from "@cloudflare/kumo/components/switch";
+import { Text } from "@cloudflare/kumo/components/text";
+import { Field } from "@cloudflare/kumo/components/field";
+import { Button } from "@cloudflare/kumo/components/button";
+import { useEffect, useState } from "react";
+import type { HolstonAgentConnection } from "../app";
+import {
+  WORKERS_AI_MODELS,
+  type ApprovalMode,
+  type HolstonState,
+} from "../shared/state";
 
-export function SettingsPanel() {
-  const [autoSkills, setAutoSkills] = useState(true);
-  const [approvalRequired, setApprovalRequired] = useState(true);
-  const [model, setModel] = useState("@cf/moonshotai/kimi-k2.7-code");
+export function SettingsPanel({
+  agent,
+  state,
+}: {
+  agent: HolstonAgentConnection;
+  state: HolstonState;
+}) {
+  const s = state.settings;
+  const [instructions, setInstructions] = useState(s.customInstructions);
+  const [savingInstructions, setSavingInstructions] = useState(false);
+
+  useEffect(() => setInstructions(s.customInstructions), [s.customInstructions]);
+
+  const patch = (p: Parameters<HolstonAgentConnection["stub"]["updateSettings"]>[0]) =>
+    agent.stub.updateSettings(p);
 
   return (
-    <div className="holston-panel">
-      <h2 className="holston-panel-title">Settings</h2>
+    <div className="h-full overflow-y-auto holston-scroll">
+      <div className="mx-auto w-full max-w-2xl p-6 flex flex-col gap-4">
+        <Text variant="heading2" as="h2">Settings</Text>
+        <Text variant="secondary" size="sm">
+          These are stored on your agent and take effect immediately — they drive
+          the model, skill behavior, and tool approvals on every turn.
+        </Text>
 
-      <div className="holston-setting">
-        <label className="holston-setting-label">
-          Auto skill creation
-        </label>
-        <p className="holston-setting-description">
-          Automatically suggest saving skills after 5+ tool calls
-        </p>
-        <label className="holston-switch">
-          <input
-            type="checkbox"
-            checked={autoSkills}
-            onChange={(e) => setAutoSkills(e.target.checked)}
-          />
-          <span className="holston-switch-slider" />
-        </label>
-      </div>
+        <Surface className="p-4 rounded-xl">
+          <Field label="Model" description="Workers AI model used for inference. No API keys required.">
+            <Select
+              value={s.model}
+              onValueChange={(v) => patch({ model: v as typeof s.model })}
+              aria-label="Model"
+            >
+              {WORKERS_AI_MODELS.map((m) => (
+                <Select.Option key={m.id} value={m.id}>{m.label}</Select.Option>
+              ))}
+            </Select>
+          </Field>
+        </Surface>
 
-      <div className="holston-setting">
-        <label className="holston-setting-label">
-          Tool approval required
-        </label>
-        <p className="holston-setting-description">
-          Require user approval before destructive tool calls
-        </p>
-        <label className="holston-switch">
-          <input
-            type="checkbox"
-            checked={approvalRequired}
-            onChange={(e) => setApprovalRequired(e.target.checked)}
-          />
-          <span className="holston-switch-slider" />
-        </label>
-      </div>
+        <Surface className="p-4 rounded-xl flex flex-col gap-4">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <Text>Auto skill proposals</Text>
+              <Text variant="secondary" size="sm">Propose reusable skills after complex tasks (5+ tool calls). Proposals wait for your approval.</Text>
+            </div>
+            <Switch checked={s.autoSkills} onCheckedChange={(v) => patch({ autoSkills: v })} aria-label="Auto skill proposals" />
+          </div>
 
-      <div className="holston-setting">
-        <label className="holston-setting-label">
-          Model (Workers AI)
-        </label>
-        <p className="holston-setting-description">
-          LLM model used for inference. Workers AI requires no API keys.
-        </p>
-        <select
-          value={model}
-          onChange={(e) => setModel(e.target.value)}
-          className="holston-select"
-        >
-          <option value="@cf/moonshotai/kimi-k2.7-code">Kimi K2.7 Code (default)</option>
-          <option value="@cf/meta/llama-3.3-70b-instruct">Llama 3.3 70B</option>
-          <option value="@cf/qwen/qwq-32b">Qwen QWQ 32B</option>
-          <option value="@cf/deepseek-ai/deepseek-r1-distill-qwen-32b">DeepSeek R1 Distill 32B</option>
-        </select>
-      </div>
+          <Field label="Tool approval" description="When Holston must ask before running a tool.">
+            <Select
+              value={s.approvalMode}
+              onValueChange={(v) => patch({ approvalMode: v as ApprovalMode })}
+              aria-label="Tool approval"
+            >
+              <Select.Option value="always">Always ask</Select.Option>
+              <Select.Option value="destructive-only">Destructive only (recommended)</Select.Option>
+              <Select.Option value="never">Never ask</Select.Option>
+            </Select>
+          </Field>
+        </Surface>
 
-      <div className="holston-setting">
-        <label className="holston-setting-label">
-          About Holston
-        </label>
-        <p className="holston-setting-description">
-          Holston Workspace v0.2.0
-          <br />
-          Built on Cloudflare Agents SDK (Think)
-          <br />
-          Workers AI for inference, R2 for skills, Vectorize for search
-        </p>
+        <Surface className="p-4 rounded-xl">
+          <Field
+            label="Custom instructions"
+            description="Appended to the system prompt on every turn. Shape Holston's persona and priorities."
+          >
+            <textarea
+              className="w-full min-h-28 rounded-lg border border-kumo-line bg-kumo-base p-2 text-kumo-default text-sm holston-scroll"
+              value={instructions}
+              onChange={(e) => setInstructions(e.target.value)}
+              placeholder="You focus on Cloudflare-native solutions. Prefer concise answers…"
+              maxLength={4000}
+            />
+          </Field>
+          <div className="flex justify-end mt-2">
+            <Button
+              size="sm"
+              variant="primary"
+              loading={savingInstructions}
+              disabled={instructions === s.customInstructions}
+              onClick={async () => {
+                setSavingInstructions(true);
+                try {
+                  await patch({ customInstructions: instructions });
+                } finally {
+                  setSavingInstructions(false);
+                }
+              }}
+            >
+              Save instructions
+            </Button>
+          </div>
+        </Surface>
+
+        <Surface className="p-4 rounded-xl border border-kumo-hairline">
+          <Text variant="heading3" as="h3">About</Text>
+          <Text variant="secondary" size="sm">
+            Holston Workspace · Cloudflare Agents SDK (Think) · Workers AI · R2 + Vectorize skills
+          </Text>
+        </Surface>
       </div>
     </div>
   );

@@ -19,19 +19,29 @@ It extends `Think<Env>` to provide a Hermes-like experience with self-improving 
 ## Architecture
 
 ```
-src/server.ts          HolstonAgent (Think) + Worker fetch/email handler
+src/server.ts          HolstonAgent (Think, HolstonState) + @callable RPC + Worker fetch/email
+src/shared/state.ts    HolstonState contract (settings/reminders/mcpServers/pushSubscriptions), shared server+client
+src/push.ts            Web Push (VAPID) send + dead-endpoint pruning
 src/auth.ts            Cloudflare Access JWT verification
-src/skills/store.ts    R2 + Vectorize skill CRUD with embeddings
+src/skills/store.ts    R2 + Vectorize skill CRUD (approved/) + curator staging (pending/)
 src/skills/hooks.ts    beforeTurn (retriever) + onChatResponse (nudger + curator)
 src/skills/tools.ts    skill_create, skill_patch, skill_load, skill_list, skill_search
-src/app.tsx            React app (chat, skills, settings tabs, dark mode, voice)
-src/components/        ChatView, SessionList, SkillsPanel, SettingsPanel, ToolApproval, ErrorBoundary, PoweredBy
+src/app.tsx            React shell (Kumo Tabs + Toasty), typed agent stub useAgent<HolstonAgent, HolstonState>
+src/lib/push.ts        Client push subscribe (service worker + VAPID key)
+src/components/        ChatView, TasksPanel, McpPanel, SkillsPanel, SettingsPanel, ToolApproval, SessionList (Kumo)
+public/sw.js           Push service worker
 skills/                Bundled SKILL.md files (agents:skills bundling)
 ```
 
 ## Key Decisions
 
 - **Think over AIChatAgent**: Think has skills, messengers, workspace tools, scheduled tasks, and lifecycle hooks built in.
+- **Synced state, not env/local**: `HolstonAgent extends Think<Env, HolstonState>` with `initialState`. Settings (model, autoSkills, approvalMode, customInstructions), reminders, MCP server views, and push subscriptions all live in state and sync to clients. `validateStateChange` rejects any client-pushed state (`source !== "server"`) — the UI mutates only through `@callable` RPC. `getModel()`/`getSystemPrompt()`/`beforeTurn()` read from `this.state.settings`, so settings actually drive each turn.
+- **@callable RPC for everything user-driven**: MCP connect/disconnect/refresh, reminder create/list/cancel, settings patch, push subscribe/unsubscribe. Client uses the typed stub via `useAgent<HolstonAgent, HolstonState>` → `agent.stub.method()` (untyped overload leaves `stub.*` possibly-undefined).
+- **Client-managed MCP**: `connectMcpServer` calls `this.addMcpServer(name, url)`; an `authenticating` result returns `authUrl` for the UI to open. `syncMcpState()` (on `onStart` + after each mutation) mirrors `getMcpServers()` into state so the panel shows live states + tool counts.
+- **Reminders**: `createReminder` parses NL with `generateObject` + `scheduleSchema`/`getSchedulePrompt`, then `this.schedule(...)` with callback `runReminder`. `runReminder` fans out via `notifyUser` (push + broadcast) AND injects a `[Reminder]` turn via `submitMessages`. `syncReminders()` filters `listSchedules()` by callback name into state.
+- **Push**: VAPID via `web-push`. `subscribePush`/`unsubscribePush` store `PushSubscription.toJSON()` in state; `sendPush` prunes 404/410 endpoints. `notifyUser` also `broadcast`s a `{type:"notification"}` message the client turns into a Kumo toast. Service worker at `public/sw.js`.
+- **Kumo UI**: Cloudflare's design system. `styles.css` = `@source` (scan Kumo dist) + `@import "@cloudflare/kumo/styles/tailwind"` + `@import "tailwindcss"` (order matters). Gotchas: `Surface` has no `variant` (className only); `Text` has no `className` (use `truncate`/`bold` props or wrap in a div); `Input`/`Select`/`Switch` use `aria-label` for hidden labels, not `hideLabel`; `Empty`/`Banner` `icon` want a rendered element (`<Icon />`), `Button` `icon` takes the component; `mono`/`mono-secondary` Text variants fix their own size.
 - **R2 + Vectorize for skills**: Skills are SKILL.md files in R2. Embeddings in Vectorize enable semantic retrieval. No external vector DB needed.
 - **Self-improving loop**: `onChatResponse` counts tool UIParts on `result.message` (ChatResponseResult has no `toolCalls` field). If >= 5, nudge logs to the agent's SQLite (6h cooldown, survives hibernation). Curator uses `generateObject` to extract a skill and STAGES it to `skills-pending/` in R2 — human approves in the Skills panel before it is embedded in Vectorize. `beforeTurn` vector-searches approved skills and returns `TurnConfig.system` (not `systemPrompt`) built from `ctx.system`.
 - **Cloudflare Access**: JWT verified in-Worker as defense-in-depth (`run_worker_first` makes the gate actually run before assets). Agent routes are guarded via `routeAgentRequest`'s `onBeforeConnect`/`onBeforeRequest`; the instance name in the URL must equal `agentNameFromEmail(user.email)`.
@@ -63,8 +73,12 @@ See `.env.example`. Set via `npx wrangler secret put <NAME>`:
 - `OWNER_EMAIL` - Owner's email; binds Telegram/scheduled traffic to their instance (wrangler.jsonc var)
 - `ALLOWED_EMAIL_SENDERS` - Comma-separated inbound email allowlist; OWNER_EMAIL always allowed (wrangler.jsonc var)
 - `EMAIL_SIGNING_SECRET` - HMAC secret for secure email reply routing (optional secret)
+- `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` - Web Push keys (optional; `npx web-push generate-vapid-keys`)
+- `EMAIL` (binding) - Optional `send_email` binding in wrangler.jsonc for agent outbound email
 
 ## Endpoints
+
+HTTP/WS endpoints below; user actions (settings, MCP, reminders, push) go through `@callable` RPC over the chat WebSocket, not HTTP.
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
@@ -75,7 +89,7 @@ See `.env.example`. Set via `npx wrangler secret put <NAME>`:
 | GET | `/api/skills` | Access JWT | Approved + pending skills |
 | POST | `/api/skills/pending/:name/approve` | Access JWT | Approve curator proposal |
 | POST | `/api/skills/pending/:name/reject` | Access JWT | Reject curator proposal |
-| WS | `/agents/holston-agent/:id` | Access JWT, `:id` bound to user | WebSocket chat (Think) |
+| WS | `/agents/holston-agent/:id` | Access JWT, `:id` bound to user | WebSocket chat + `@callable` RPC (Think) |
 | POST | `/messengers/telegram/webhook` | Telegram secret token | Telegram webhook -> owner instance |
 | Email | `email()` handler | Sender allowlist + HMAC replies | `routeAgentEmail` -> per-sender instance |
 

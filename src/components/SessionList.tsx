@@ -1,64 +1,39 @@
+import { Button } from "@cloudflare/kumo/components/button";
+import { Surface } from "@cloudflare/kumo/components/surface";
+import { Text } from "@cloudflare/kumo/components/text";
+import { PlusIcon } from "@phosphor-icons/react";
 import type { UIMessage } from "ai";
-import { useEffect, useState } from "react";
 
-interface SessionListProps {
-  messages: UIMessage[];
-  onClear: () => void;
-}
+export function SessionList({ messages }: { messages: UIMessage[] }) {
+  const preview =
+    messages.length > 0
+      ? (messages[0]?.parts?.find((p) => p.type === "text") as { text?: string } | undefined)?.text?.slice(0, 60) ?? "New conversation"
+      : "New conversation";
 
-interface Session {
-  id: string;
-  preview: string;
-  timestamp: string;
-  messageCount: number;
-}
-
-export function SessionList({ messages, onClear }: SessionListProps) {
-  const [sessions, setSessions] = useState<Session[]>([]);
-
-  useEffect(() => {
-    const currentSession: Session = {
-      id: "current",
-      preview: messages.length > 0
-        ? (messages[0]?.parts?.find((p) => p.type === "text") as { text?: string } | undefined)?.text?.slice(0, 60) ?? "New conversation"
-        : "New conversation",
-      timestamp: new Date().toISOString(),
-      messageCount: messages.length,
-    };
-    setSessions([currentSession]);
-  }, [messages]);
-
-  const handleNew = () => {
+  const newConversation = () => {
     if (messages.length > 0 && typeof window !== "undefined") {
-      if (window.confirm("Start a new conversation? Current chat will be cleared from view.")) {
-        onClear();
+      if (window.confirm("Start a new conversation? The current chat stays in the agent's history but clears from view.")) {
         window.location.reload();
       }
     }
   };
 
   return (
-    <div className="holston-sidebar-content">
-      <div className="holston-sidebar-header">
-        <h2 className="holston-sidebar-title">Holston Workspace</h2>
-        <button className="holston-btn holston-btn-ghost" onClick={handleNew} title="New conversation">
-          + New
-        </button>
+    <div className="flex flex-col h-full">
+      <div className="flex items-center justify-between px-3 py-3 border-b border-kumo-hairline">
+        <Text variant="heading3" as="h1">Holston</Text>
+        <Button size="sm" variant="ghost" icon={PlusIcon} onClick={newConversation}>New</Button>
       </div>
 
-      <div className="holston-session-list">
-        {sessions.map((session) => (
-          <div key={session.id} className="holston-session-item holston-session-active">
-            <div className="holston-session-preview">{session.preview}</div>
-            <div className="holston-session-meta">
-              <span>{session.messageCount} messages</span>
-            </div>
-          </div>
-        ))}
+      <div className="flex-1 overflow-y-auto holston-scroll p-2">
+        <Surface className="p-3 rounded-lg">
+          <Text size="sm" truncate>{preview}</Text>
+          <Text variant="secondary" size="sm">{messages.length} messages</Text>
+        </Surface>
       </div>
 
-      <div className="holston-sidebar-footer">
-        <p>State persists in Durable Object SQLite.</p>
+      <div className="px-3 py-2 border-t border-kumo-hairline">
+        <Text variant="secondary" size="xs">State persists in Durable Object SQLite.</Text>
       </div>
     </div>
   );

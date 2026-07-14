@@ -1,6 +1,20 @@
-import { useRef, useEffect, useState } from "react";
+import { Badge } from "@cloudflare/kumo/components/badge";
+import { Button } from "@cloudflare/kumo/components/button";
+import { Collapsible } from "@cloudflare/kumo/components/collapsible";
+import { Empty } from "@cloudflare/kumo/components/empty";
+import { Input } from "@cloudflare/kumo/components/input";
+import { Loader } from "@cloudflare/kumo/components/loader";
+import { Surface } from "@cloudflare/kumo/components/surface";
+import { Text } from "@cloudflare/kumo/components/text";
+import {
+  ChatCircleIcon,
+  MicrophoneIcon,
+  PaperPlaneRightIcon,
+  StopIcon,
+} from "@phosphor-icons/react";
+import { getToolName, isToolUIPart, type UIMessage } from "ai";
+import { useEffect, useRef, useState } from "react";
 import { Streamdown } from "streamdown";
-import { isToolUIPart, getToolName, type UIMessage } from "ai";
 
 interface ChatViewProps {
   messages: UIMessage[];
@@ -24,111 +38,84 @@ export function ChatView({
   onVoiceStop,
 }: ChatViewProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const [localInput, setLocalInput] = useState("");
-  const [showReasoning, setShowReasoning] = useState<Record<string, boolean>>({});
+  const [input, setInput] = useState("");
+  const transcriptRef = useRef("");
 
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
   useEffect(() => {
-    if (!isLoading && inputRef.current) inputRef.current.focus();
-  }, [isLoading]);
-
-  useEffect(() => {
-    if (interimTranscript) {
-      setLocalInput(interimTranscript);
-    }
-  }, [interimTranscript]);
-
-  useEffect(() => {
-    if (!isListening && interimTranscript === null && transcriptRef.current) {
-      setLocalInput(transcriptRef.current);
-      transcriptRef.current = "";
-    }
-  }, [isListening, interimTranscript]);
-
-  const transcriptRef = useRef("");
-
-  useEffect(() => {
     if (isListening && interimTranscript) {
       transcriptRef.current = (transcriptRef.current + " " + interimTranscript).trim();
+      setInput(transcriptRef.current);
     }
   }, [isListening, interimTranscript]);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const submit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!localInput.trim() || isLoading) return;
-    sendMessage({ text: localInput } as never);
-    setLocalInput("");
+    if (!input.trim() || isLoading) return;
+    sendMessage({ text: input });
+    setInput("");
     transcriptRef.current = "";
   };
 
-  const handleVoiceToggle = () => {
-    if (isListening) {
-      onVoiceStop();
-    } else {
-      onVoiceStart();
-    }
-  };
-
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      <div className="holston-chat" style={{ flex: 1, overflowY: "auto" }}>
-        {messages.length === 0 && (
-          <div className="holston-empty">
-            <p>Ask Holston anything. It has tools, skills, and workspace access.</p>
-          </div>
-        )}
+    <div className="flex flex-col h-full">
+      <div className="flex-1 overflow-y-auto holston-scroll px-4 py-6">
+        <div className="mx-auto w-full max-w-3xl flex flex-col gap-4">
+          {messages.length === 0 && (
+            <div className="pt-16">
+              <Empty
+                icon={<ChatCircleIcon size={32} />}
+                title="Ask Holston anything"
+                description="It has workspace tools, MCP servers, skills, reminders, and can reach you by Telegram, email, and push."
+              />
+            </div>
+          )}
 
-        {messages.map((message) => (
-          <Message
-            key={message.id}
-            message={message}
-            showReasoning={showReasoning[message.id] ?? false}
-            onToggleReasoning={() =>
-              setShowReasoning((prev) => ({ ...prev, [message.id]: !prev[message.id] }))
-            }
-          />
-        ))}
+          {messages.map((message) => (
+            <Message key={message.id} message={message} />
+          ))}
 
-        {isLoading && (
-          <div className="holston-message holston-message-assistant">
-            <span className="holston-thinking">Thinking...</span>
-          </div>
-        )}
+          {isLoading && (
+            <div className="flex items-center gap-2 text-kumo-subtle">
+              <Loader size={16} />
+              <Text variant="secondary" size="sm">Thinking…</Text>
+            </div>
+          )}
 
-        <div ref={scrollRef} />
+          <div ref={scrollRef} />
+        </div>
       </div>
 
-      <form onSubmit={handleSubmit} className="holston-composer">
-        <div className="holston-input-row">
-          <button
+      <form onSubmit={submit} className="border-t border-kumo-hairline bg-kumo-base px-4 py-3">
+        <div className="mx-auto w-full max-w-3xl flex items-center gap-2">
+          <Button
             type="button"
-            className={`holston-btn holston-btn-voice ${isListening ? "holston-btn-voice-active" : ""}`}
-            onClick={handleVoiceToggle}
-            title={isListening ? "Stop voice input" : "Start voice input"}
-          >
-            {isListening ? "Stop" : "Voice"}
-          </button>
-          <input
-            ref={inputRef}
-            type="text"
-            value={localInput}
-            onChange={(e) => setLocalInput(e.target.value)}
-            placeholder={isListening ? "Listening..." : "Message Holston..."}
-            className="holston-input"
-            disabled={isLoading}
+            variant={isListening ? "primary" : "ghost"}
+            size="base"
+            icon={MicrophoneIcon}
+            onClick={isListening ? onVoiceStop : onVoiceStart}
+            aria-label={isListening ? "Stop voice input" : "Start voice input"}
           />
+          <div className="flex-1">
+            <Input
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder={isListening ? "Listening…" : "Message Holston…"}
+              aria-label="Message Holston"
+              disabled={isLoading}
+            />
+          </div>
           {isLoading ? (
-            <button type="button" className="holston-btn holston-btn-stop" onClick={stop}>
+            <Button type="button" variant="secondary-destructive" icon={StopIcon} onClick={stop}>
               Stop
-            </button>
+            </Button>
           ) : (
-            <button type="submit" className="holston-btn holston-btn-send" disabled={!localInput.trim()}>
+            <Button type="submit" variant="primary" icon={PaperPlaneRightIcon} disabled={!input.trim()}>
               Send
-            </button>
+            </Button>
           )}
         </div>
       </form>
@@ -136,100 +123,99 @@ export function ChatView({
   );
 }
 
-function Message({
-  message,
-  showReasoning,
-  onToggleReasoning,
-}: {
-  message: UIMessage;
-  showReasoning: boolean;
-  onToggleReasoning: () => void;
-}) {
+function Message({ message }: { message: UIMessage }) {
   const isUser = message.role === "user";
 
-  const textParts = message.parts?.filter((p) => p.type === "text") as
-    | Array<{ type: "text"; text: string }>
-    | undefined;
-
-  const reasoningParts = message.parts?.filter((p) => p.type === "reasoning") as
-    | Array<{ type: "reasoning"; text?: string; reasoning?: string } | { type: string; reasoning?: string }>
-    | undefined;
-
-  const toolParts = message.parts?.filter((p) => isToolUIPart(p)) as
-    | Array<{ type: string; state?: string; input?: unknown; output?: unknown; approval?: { id?: string } }>
-    | undefined;
-
-  const hasReasoning = reasoningParts && reasoningParts.length > 0;
+  const textParts = (message.parts ?? []).filter((p) => p.type === "text") as Array<{ type: "text"; text: string }>;
+  const reasoningParts = (message.parts ?? []).filter((p) => p.type === "reasoning") as Array<{ text?: string; reasoning?: string }>;
+  const toolParts = (message.parts ?? []).filter((p) => isToolUIPart(p));
 
   return (
-    <div className={`holston-message ${isUser ? "holston-message-user" : "holston-message-assistant"}`}>
-      {hasReasoning && (
-        <div className="holston-reasoning">
-          <button className="holston-reasoning-toggle" onClick={onToggleReasoning}>
-            {showReasoning ? "Hide" : "Show"} reasoning
-          </button>
-          {showReasoning && (
-            <div className="holston-reasoning-body">
-              {reasoningParts!.map((part, i) => (
-                <p key={i}>
-                  {(part as { reasoning?: string }).reasoning ?? (part as { text?: string }).text}
-                </p>
+    <div className={isUser ? "flex justify-end" : "flex justify-start"}>
+      <Surface
+        className={`max-w-[85%] px-4 py-3 rounded-xl border border-kumo-hairline ${isUser ? "bg-kumo-brand text-kumo-inverse" : "bg-kumo-base"}`}
+      >
+        {reasoningParts.length > 0 && (
+          <Collapsible title="Reasoning" defaultOpen={false}>
+            <div className="text-kumo-subtle text-sm">
+              {reasoningParts.map((part, i) => (
+                <p key={i}>{part.reasoning ?? part.text}</p>
               ))}
             </div>
-          )}
-        </div>
-      )}
+          </Collapsible>
+        )}
 
-      {textParts?.map((part, i) => (
-        <Streamdown key={i}>{part.text}</Streamdown>
-      ))}
-
-      {toolParts?.map((part, i) => {
-        const name = getToolName(part as never);
-        const state = part.state;
-
-        if (state === "approval-requested") {
-          return (
-            <div key={i} className="holston-tool holston-tool-approval">
-              <span className="holston-tool-label">Approval needed:</span>
-              <span className="holston-tool-name">{name}</span>
-              <pre className="holston-tool-input">
-                {JSON.stringify(part.input, null, 2).slice(0, 500)}
-              </pre>
-            </div>
-          );
-        }
-
-        if (state === "output-denied") {
-          return (
-            <div key={i} className="holston-tool holston-tool-rejected">
-              <span className="holston-tool-name">{name}</span>
-              <span className="holston-tool-badge">Rejected</span>
-            </div>
-          );
-        }
-
-        if (state === "output-available") {
-          return (
-            <div key={i} className="holston-tool holston-tool-done">
-              <div className="holston-tool-header">
-                <span className="holston-tool-name">{name}</span>
-                <span className="holston-tool-badge">Done</span>
-              </div>
-              <pre className="holston-tool-output">
-                {JSON.stringify(part.output, null, 2).slice(0, 500)}
-              </pre>
-            </div>
-          );
-        }
-
-        return (
-          <div key={i} className="holston-tool holston-tool-running">
-            <span className="holston-tool-spinner" />
-            <span className="holston-tool-name">Running {name}...</span>
+        {textParts.map((part, i) => (
+          <div key={i} className="holston-markdown">
+            <Streamdown>{part.text}</Streamdown>
           </div>
-        );
-      })}
+        ))}
+
+        {toolParts.map((part, i) => (
+          <ToolPart key={i} part={part} />
+        ))}
+      </Surface>
     </div>
+  );
+}
+
+function ToolPart({ part }: { part: unknown }) {
+  const p = part as { state?: string; input?: unknown; output?: unknown };
+  const name = getToolName(part as never);
+  const state = p.state;
+
+  if (state === "approval-requested") {
+    return (
+      <ToolBox tone="warning" name={name} badge="Approval needed">
+        <Preview value={p.input} />
+      </ToolBox>
+    );
+  }
+  if (state === "output-denied") {
+    return <ToolBox tone="danger" name={name} badge="Rejected" />;
+  }
+  if (state === "output-available") {
+    return (
+      <ToolBox tone="success" name={name} badge="Done">
+        <Preview value={p.output} />
+      </ToolBox>
+    );
+  }
+  return (
+    <div className="mt-2 flex items-center gap-2 text-kumo-subtle">
+      <Loader size={14} />
+      <Text variant="mono-secondary">Running {name}…</Text>
+    </div>
+  );
+}
+
+function ToolBox({
+  tone,
+  name,
+  badge,
+  children,
+}: {
+  tone: "warning" | "danger" | "success";
+  name: string;
+  badge: string;
+  children?: React.ReactNode;
+}) {
+  const variant = tone === "danger" ? "destructive" : tone === "success" ? "secondary" : "outline";
+  return (
+    <div className="mt-2 rounded-lg border border-kumo-hairline bg-kumo-tint p-2">
+      <div className="flex items-center gap-2">
+        <Text variant="mono">{name}</Text>
+        <Badge variant={variant as never}>{badge}</Badge>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function Preview({ value }: { value: unknown }) {
+  return (
+    <pre className="mt-1 overflow-x-auto text-xs text-kumo-subtle holston-scroll">
+      {JSON.stringify(value, null, 2).slice(0, 600)}
+    </pre>
   );
 }

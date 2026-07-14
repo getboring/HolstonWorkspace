@@ -1,50 +1,46 @@
+import { Button } from "@cloudflare/kumo/components/button";
+import { Dialog } from "@cloudflare/kumo/components/dialog";
+import { Text } from "@cloudflare/kumo/components/text";
+import { getToolName } from "ai";
 import { useState } from "react";
 
 interface ToolApprovalProps {
-  toolName: string;
-  input: unknown;
+  part: unknown;
   onApprove: () => void;
-  onReject: (reason?: string) => void;
+  onReject: () => void;
 }
 
-export function ToolApproval({ toolName, input, onApprove, onReject }: ToolApprovalProps) {
+export function ToolApproval({ part, onApprove, onReject }: ToolApprovalProps) {
   const [open, setOpen] = useState(true);
-  if (!open) return null;
+  const p = part as { input?: unknown };
+  const toolName = getToolName(part as never);
 
   return (
-    <div className="holston-approval">
-      <div className="holston-approval-card">
-        <h3 className="holston-approval-title">Tool Approval Required</h3>
-        <p className="holston-approval-text">
-          The agent wants to call:
-        </p>
-        <div className="holston-approval-tool">
-          <p className="holston-approval-toolname">{toolName}</p>
-          <pre className="holston-approval-input">
-            {JSON.stringify(input, null, 2).slice(0, 500)}
+    <Dialog.Root open={open} onOpenChange={setOpen}>
+      <Dialog size="base" className="p-6">
+        <Dialog.Title>Approve tool call</Dialog.Title>
+        <Dialog.Description>Holston wants to run this tool.</Dialog.Description>
+        <div className="mt-3 rounded-lg border border-kumo-hairline bg-kumo-tint p-3">
+          <Text variant="mono">{toolName}</Text>
+          <pre className="mt-2 max-h-64 overflow-auto text-xs text-kumo-subtle holston-scroll">
+            {JSON.stringify(p.input, null, 2).slice(0, 800)}
           </pre>
         </div>
-        <div className="holston-approval-actions">
-          <button
-            className="holston-btn holston-btn-reject"
-            onClick={() => {
-              onReject("User rejected the tool call");
-              setOpen(false);
-            }}
+        <div className="mt-4 flex justify-end gap-2">
+          <Button
+            variant="secondary-destructive"
+            onClick={() => { onReject(); setOpen(false); }}
           >
             Reject
-          </button>
-          <button
-            className="holston-btn holston-btn-approve"
-            onClick={() => {
-              onApprove();
-              setOpen(false);
-            }}
+          </Button>
+          <Button
+            variant="primary"
+            onClick={() => { onApprove(); setOpen(false); }}
           >
             Approve
-          </button>
+          </Button>
         </div>
-      </div>
-    </div>
+      </Dialog>
+    </Dialog.Root>
   );
 }

@@ -1,10 +1,56 @@
-export function SessionList() {
+import type { UIMessage } from "ai";
+import { useEffect, useState } from "react";
+
+interface SessionListProps {
+  messages: UIMessage[];
+  onClear: () => void;
+}
+
+interface Session {
+  id: string;
+  preview: string;
+  timestamp: string;
+  messageCount: number;
+}
+
+export function SessionList({ messages, onClear }: SessionListProps) {
+  const [sessions, setSessions] = useState<Session[]>([]);
+
+  useEffect(() => {
+    const currentSession: Session = {
+      id: "current",
+      preview: messages.length > 0
+        ? (messages[0]?.parts?.find((p) => p.type === "text") as { text?: string } | undefined)?.text?.slice(0, 60) ?? "New conversation"
+        : "New conversation",
+      timestamp: new Date().toISOString(),
+      messageCount: messages.length,
+    };
+    setSessions([currentSession]);
+  }, [messages]);
+
   return (
-    <div style={{ padding: "1rem" }}>
-      <p style={{ fontWeight: 600, fontSize: "1rem", margin: 0 }}>Holston Workspace</p>
-      <p style={{ fontSize: "0.85rem", color: "var(--kumo-muted, #888)", marginTop: "0.5rem" }}>
-        Sessions load from the agent durable SQLite state.
-      </p>
+    <div className="holston-sidebar-content">
+      <div className="holston-sidebar-header">
+        <h2 className="holston-sidebar-title">Holston Workspace</h2>
+        <button className="holston-btn holston-btn-ghost" onClick={onClear} title="Clear conversation">
+          + New
+        </button>
+      </div>
+
+      <div className="holston-session-list">
+        {sessions.map((session) => (
+          <div key={session.id} className="holston-session-item holston-session-active">
+            <div className="holston-session-preview">{session.preview}</div>
+            <div className="holston-session-meta">
+              <span>{session.messageCount} messages</span>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="holston-sidebar-footer">
+        <p>State persists in Durable Object SQLite.</p>
+      </div>
     </div>
   );
 }

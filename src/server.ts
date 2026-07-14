@@ -9,7 +9,7 @@ import { getAgentByName, routeAgentRequest } from "agents";
 import bundledSkills from "agents:skills";
 import { createWorkersAI } from "workers-ai-provider";
 import { createSkillTools } from "./skills/tools";
-import { retrieverHook, nudgerHook } from "./skills/hooks";
+import { retrieverHook, nudgerHook, curatorHook } from "./skills/hooks";
 import { SkillStore } from "./skills/store";
 import { verifyAccessJWT, agentNameFromEmail } from "./auth";
 
@@ -87,11 +87,7 @@ export class HolstonAgent extends Think<Env> {
   override async beforeTurn(
     ctx: Parameters<Think<Env>["beforeTurn"]>[0],
   ): Promise<void | TurnConfig> {
-    const store = new SkillStore(
-      this.env.SKILLS_BUCKET,
-      this.env.SKILLS_INDEX,
-      this.env.AI,
-    );
+    const store = this.skillStore();
     const result = await retrieverHook(store, ctx, this.getSystemPrompt());
     if (result && typeof result === "object" && "systemPrompt" in result) {
       return { systemPrompt: result.systemPrompt } as TurnConfig;
@@ -99,14 +95,19 @@ export class HolstonAgent extends Think<Env> {
   }
 
   override async onChatResponse(
-    _result: Parameters<Think<Env>["onChatResponse"]>[0],
+    result: Parameters<Think<Env>["onChatResponse"]>[0],
   ) {
-    const store = new SkillStore(
+    const store = this.skillStore();
+    await nudgerHook(store, this as unknown as { sql?: SqlStorage }, result as never);
+    await curatorHook(store, this.env.AI, result as never, this.session as never);
+  }
+
+  private skillStore(): SkillStore {
+    return new SkillStore(
       this.env.SKILLS_BUCKET,
       this.env.SKILLS_INDEX,
       this.env.AI,
     );
-    await nudgerHook(store, this as unknown as { sql?: SqlStorage }, _result as never);
   }
 }
 
@@ -118,7 +119,7 @@ export default {
       return Response.json({
         status: "ok",
         agent: "holston-workspace",
-        version: "0.1.0",
+        version: "0.2.0",
         timestamp: new Date().toISOString(),
         auth: env.TEAM_DOMAIN ? "cf-access" : "none",
         telegram: env.TELEGRAM_BOT_TOKEN ? "configured" : "not-configured",
@@ -148,6 +149,12 @@ export default {
       });
     }
 
+    if (request.method === "GET" && url.pathname === "/api/skills") {
+      const store = new SkillStore(env.SKILLS_BUCKET, env.SKILLS_INDEX, env.AI);
+      const all = await store.list();
+      return Response.json({ skills: all });
+    }
+
     if (url.pathname === "/" || url.pathname === "/index.html") {
       const user = await verifyAccessJWT(request, env);
       if (env.TEAM_DOMAIN && !user) {
@@ -164,8 +171,8 @@ export default {
   },
 
   async email(message: ForwardableEmailMessage, env: Env) {
-    const agent = await getAgentByName(env.HolstonAgent as never, DEFAULT_AGENT);
-    const from = message.from;
+    const agentName = agentNameFromEmail(message.from);
+    const agent = await getAgentByName(env.HolstonAgent as never, agentName);
     const subject = message.headers.get("subject") ?? "(no subject)";
     const rawEmail = await new Response(message.raw).text();
     const bodyText = extractEmailBody(rawEmail);
@@ -177,14 +184,14 @@ export default {
           parts: [
             {
               type: "text",
-              text: `[Email from ${from}]\nSubject: ${subject}\n\n${bodyText}`,
+              text: `[Email from ${message.from}]\nSubject: ${subject}\n\n${bodyText}`,
             },
           ],
         },
       ],
       metadata: {
         source: "email",
-        from,
+        from: message.from,
         subject,
       },
     } as never);

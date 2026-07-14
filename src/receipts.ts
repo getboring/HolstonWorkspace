@@ -39,6 +39,10 @@ export class ReceiptStore {
     this.agent.sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_receipts_key
       ON action_receipts (action, idempotency_key)
       WHERE idempotency_key IS NOT NULL`;
+    // Index the newest-first read path (list()) so it doesn't full-scan as the
+    // ledger grows.
+    this.agent.sql`CREATE INDEX IF NOT EXISTS idx_receipts_created
+      ON action_receipts (created_at DESC)`;
   }
 
   /** Whether a receipt already exists for this idempotency key. */

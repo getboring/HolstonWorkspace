@@ -5,4 +5,4 @@ dist/
 *.log
 .env
 .dev.vars
-env.d.ts.bak
+env.d.ts.bak.claude/

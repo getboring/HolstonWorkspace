@@ -42,6 +42,7 @@ import {
 import { R2SkillProvider } from "agents/experimental/memory/session";
 import { createActions } from "./actions";
 import { agentNameFromEmail, verifyAccessJWT, type AuthUser } from "./auth";
+import { assertSameOrigin } from "./core/csrf";
 import { subscribeObservability } from "./observability";
 import { sendPush } from "./push";
 import { ReceiptStore, type Receipt } from "./receipts";
@@ -996,6 +997,9 @@ export default {
       /^\/api\/skills\/pending\/([^/]+)\/(approve|reject)$/,
     );
     if (request.method === "POST" && pendingAction) {
+      // Browser-driven mutation: block cross-origin (CSRF) before auth.
+      const csrf = assertSameOrigin(request);
+      if (csrf) return csrf;
       const auth = await authorize(request, env);
       if (auth instanceof Response) return auth;
       const name = decodeURIComponent(pendingAction[1] ?? "");

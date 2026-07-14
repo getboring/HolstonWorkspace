@@ -1,3 +1,5 @@
+import { withCircuitBreaker } from "../core/circuit-breaker";
+
 export interface SkillRecord {
   name: string;
   description: string;
@@ -146,12 +148,21 @@ export class SkillStore {
   }
 
   async search(query: string, limit = 3): Promise<SkillSearchResult[]> {
-    let embedding: number[];
-    try {
-      embedding = await this.getEmbedding(query);
-    } catch {
-      return [];
-    }
+    // Circuit-break the Workers-AI embedding + Vectorize query: after repeated
+    // failures, skip straight to the empty fallback instead of eating the full
+    // latency on every skill retrieval during a brownout.
+    return withCircuitBreaker(
+      "skill-search",
+      () => this.searchUncached(query, limit),
+      [],
+    );
+  }
+
+  private async searchUncached(
+    query: string,
+    limit: number,
+  ): Promise<SkillSearchResult[]> {
+    const embedding = await this.getEmbedding(query);
 
     const results = await this.vectorize.query(embedding, {
       topK: limit,

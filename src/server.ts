@@ -23,11 +23,11 @@ import {
   isAutoReplyEmail,
   type AgentEmail,
 } from "agents/email";
-import { getSchedulePrompt, scheduleSchema } from "agents/schedule";
 import bundledSkills from "agents:skills";
 import { generateObject } from "ai";
 import PostalMime from "postal-mime";
 import { createWorkersAI } from "workers-ai-provider";
+import { z } from "zod";
 import { agentNameFromEmail, verifyAccessJWT, type AuthUser } from "./auth";
 import { sendPush } from "./push";
 import {
@@ -216,33 +216,45 @@ export class HolstonAgent extends Think<Env, HolstonState> {
 
   /**
    * Create a reminder from natural language ("remind me to call mom tomorrow
-   * at 3pm", "every weekday at 9am send a standup prompt"). Parsed with the
-   * SDK's schedule schema, then registered as a durable schedule.
+   * at 3pm", "every weekday at 9am send a standup prompt").
+   *
+   * We use a FLAT schema (kind + optional datetime/cron) rather than the SDK's
+   * discriminated-union scheduleSchema — small Workers AI models populate a
+   * flat shape far more reliably than a nested union, which was returning
+   * `no-schedule` for clear inputs.
    */
   @callable()
   async createReminder(request: string): Promise<ReminderView> {
+    const now = new Date();
     const model = createWorkersAI({ binding: this.env.AI })(DEFAULT_MODEL);
     const { object } = await generateObject({
       model,
-      schema: scheduleSchema,
-      system: getSchedulePrompt({ date: new Date() }),
+      schema: reminderParseSchema,
+      system: [
+        `The current date and time is ${now.toISOString()} (UTC).`,
+        "Extract a reminder from the user's message.",
+        "- message: what to be reminded about (imperative, no time words).",
+        '- kind: "once" for a single time, "recurring" for anything repeating.',
+        '- For "once": set datetime to a full ISO 8601 UTC timestamp in the future.',
+        '- For "recurring": set cron to a standard 5-field cron expression (UTC).',
+        "Resolve relative times (tomorrow, in 2 hours, next Monday) against the current time above.",
+      ].join("\n"),
       prompt: request,
     });
 
-    const message = object.description || request;
-    const when = object.when;
+    const message = (object.message || request).trim();
     let schedule: Schedule<{ message: string }>;
 
-    if (when.type === "scheduled" && when.date) {
-      schedule = await this.schedule(new Date(when.date), REMINDER_CALLBACK, {
-        message,
-      });
-    } else if (when.type === "delayed" && when.delayInSeconds) {
-      schedule = await this.schedule(when.delayInSeconds, REMINDER_CALLBACK, {
-        message,
-      });
-    } else if (when.type === "cron" && when.cron) {
-      schedule = await this.schedule(when.cron, REMINDER_CALLBACK, { message });
+    if (object.kind === "once" && object.datetime.trim()) {
+      const date = new Date(object.datetime);
+      if (Number.isNaN(date.getTime()) || date.getTime() <= Date.now()) {
+        throw new Error(
+          "That time is in the past or unclear. Try 'tomorrow at 3pm' or 'in 2 hours'.",
+        );
+      }
+      schedule = await this.schedule(date, REMINDER_CALLBACK, { message });
+    } else if (object.kind === "recurring" && object.cron.trim()) {
+      schedule = await this.schedule(object.cron, REMINDER_CALLBACK, { message });
     } else {
       throw new Error(
         "Could not parse a time from that request. Try 'tomorrow at 3pm' or 'every weekday at 9am'.",
@@ -411,6 +423,28 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     return this.#skillStore;
   }
 }
+
+// All fields required (not optional) so small models can't skip the time —
+// the failure mode was `{message, kind:"once"}` with datetime omitted. For the
+// branch that doesn't apply, the model emits the empty-string sentinel.
+const reminderParseSchema = z.object({
+  message: z
+    .string()
+    .describe("What to be reminded about, imperative, no time words"),
+  kind: z
+    .enum(["once", "recurring"])
+    .describe("once = single time, recurring = repeats"),
+  datetime: z
+    .string()
+    .describe(
+      'When kind is "once": full ISO 8601 UTC timestamp in the future, e.g. "2026-07-15T19:00:00Z". When kind is "recurring": empty string "".',
+    ),
+  cron: z
+    .string()
+    .describe(
+      'When kind is "recurring": 5-field UTC cron expression, e.g. "0 14 * * 1-5". When kind is "once": empty string "".',
+    ),
+});
 
 function toReminderView(schedule: Schedule<{ message: string }>): ReminderView {
   const message = schedule.payload?.message ?? "(reminder)";

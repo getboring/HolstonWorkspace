@@ -11,6 +11,10 @@ interface Env {
   OWNER_EMAIL?: string;
   ALLOWED_EMAIL_SENDERS?: string;
   EMAIL_SIGNING_SECRET?: string;
+  EMAIL?: SendEmail;
+  VAPID_PUBLIC_KEY?: string;
+  VAPID_PRIVATE_KEY?: string;
+  VAPID_SUBJECT?: string;
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_BOT_USERNAME?: string;
   TELEGRAM_WEBHOOK_SECRET_TOKEN?: string;

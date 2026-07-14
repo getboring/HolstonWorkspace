@@ -1,14 +1,36 @@
-import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
+import { Tabs } from "@cloudflare/kumo/components/tabs";
+import { Text } from "@cloudflare/kumo/components/text";
+import { Toast, Toasty } from "@cloudflare/kumo/components/toast";
+import { Button } from "@cloudflare/kumo/components/button";
+import { Loader } from "@cloudflare/kumo/components/loader";
+import { Empty } from "@cloudflare/kumo/components/empty";
+import {
+  ChatCircleIcon,
+  GearIcon,
+  LightningIcon,
+  MoonIcon,
+  PlugsConnectedIcon,
+  SidebarIcon,
+  SparkleIcon,
+  SunIcon,
+} from "@phosphor-icons/react";
 import { useVoiceInput } from "@cloudflare/voice/react";
-import { getToolName, isToolUIPart, type UIMessage } from "ai";
-import { useState, useEffect, type ReactNode } from "react";
+import { isToolUIPart, type UIMessage } from "ai";
+import { useAgent } from "agents/react";
+import { useEffect, useState } from "react";
 import { ChatView } from "./components/ChatView";
-import { SessionList } from "./components/SessionList";
-import { SkillsPanel } from "./components/SkillsPanel";
-import { SettingsPanel } from "./components/SettingsPanel";
-import { ToolApproval } from "./components/ToolApproval";
+import { McpPanel } from "./components/McpPanel";
 import { PoweredBy } from "./components/PoweredBy";
+import { SessionList } from "./components/SessionList";
+import { SettingsPanel } from "./components/SettingsPanel";
+import { SkillsPanel } from "./components/SkillsPanel";
+import { TasksPanel } from "./components/TasksPanel";
+import { ToolApproval } from "./components/ToolApproval";
+import type { HolstonAgent } from "./server";
+import { INITIAL_STATE, type HolstonState } from "./shared/state";
+
+type Tab = "chat" | "tasks" | "mcp" | "skills" | "settings";
 
 export function App() {
   const [dark, setDark] = useState(() => {
@@ -23,8 +45,6 @@ export function App() {
     try { localStorage.setItem("theme", mode); } catch {}
   }, [dark]);
 
-  // The server derives the instance name from the Access JWT, so each user
-  // lands on their own agent. Falls back to "default" for local dev.
   const [agentName, setAgentName] = useState<string | null>(null);
   const [infoError, setInfoError] = useState<string | null>(null);
 
@@ -35,148 +55,137 @@ export function App() {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json() as Promise<{ agentName: string }>;
       })
-      .then((info) => {
-        if (!cancelled) setAgentName(info.agentName || "default");
-      })
-      .catch((err) => {
-        if (!cancelled) setInfoError(err instanceof Error ? err.message : "Failed to load agent info");
-      });
-    return () => {
-      cancelled = true;
-    };
+      .then((info) => !cancelled && setAgentName(info.agentName || "default"))
+      .catch((err) => !cancelled && setInfoError(err instanceof Error ? err.message : "Failed to load agent info"));
+    return () => { cancelled = true; };
   }, []);
 
   if (infoError) {
     return (
-      <div className="holston-app" data-mode={dark ? "dark" : "light"}>
-        <div className="holston-main">
-          <p className="holston-error">Could not connect to your agent ({infoError}). Are you signed in?</p>
-        </div>
-      </div>
+      <Centered dark={dark}>
+        <Empty title="Could not connect to your agent" description={`${infoError}. Are you signed in?`} icon={<PlugsConnectedIcon size={32} />} />
+      </Centered>
     );
   }
-
   if (!agentName) {
     return (
-      <div className="holston-app" data-mode={dark ? "dark" : "light"}>
-        <div className="holston-main">
-          <p className="holston-loading">Connecting to your agent...</p>
+      <Centered dark={dark}>
+        <div className="flex flex-col items-center gap-3">
+          <Loader size={28} />
+          <Text variant="secondary">Connecting to your agent…</Text>
         </div>
-      </div>
+      </Centered>
     );
   }
 
-  return <Workspace agentName={agentName} dark={dark} setDark={setDark} />;
+  return (
+    <Toasty>
+      <Workspace agentName={agentName} dark={dark} setDark={setDark} />
+    </Toasty>
+  );
 }
 
-function Workspace({
-  agentName,
-  dark,
-  setDark,
-}: {
-  agentName: string;
-  dark: boolean;
-  setDark: (dark: boolean) => void;
-}) {
-  const [activeTab, setActiveTab] = useState<"chat" | "skills" | "settings">("chat");
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+function Centered({ children, dark }: { children: React.ReactNode; dark: boolean }) {
+  return (
+    <div className="holston-app bg-kumo-canvas" data-mode={dark ? "dark" : "light"}>
+      <div className="flex-1 flex items-center justify-center p-8">{children}</div>
+    </div>
+  );
+}
 
-  const agent = useAgent({
+function Workspace({ agentName, dark, setDark }: { agentName: string; dark: boolean; setDark: (d: boolean) => void }) {
+  const [activeTab, setActiveTab] = useState<Tab>("chat");
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [state, setState] = useState<HolstonState>(INITIAL_STATE);
+  const toast = Toast.useToastManager();
+
+  const agent = useAgent<HolstonAgent, HolstonState>({
     agent: "HolstonAgent",
     name: agentName,
-    onOpen: () => console.log("[holston] WebSocket connected"),
-    onClose: () => console.log("[holston] WebSocket disconnected"),
+    onStateUpdate: (s) => setState(s),
+    onMessage: (event: MessageEvent) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data?.type === "notification") {
+          toast.add({ title: data.title, description: data.body });
+        }
+      } catch { /* not our message */ }
+    },
     onError: (error: Event) => console.error("[holston] WebSocket error:", error),
   });
 
-  const {
-    messages,
-    status,
-    stop,
-    sendMessage,
-    addToolApprovalResponse,
-  } = useAgentChat({ agent });
-
+  const { messages, status, stop, sendMessage, addToolApprovalResponse } = useAgentChat({ agent });
   const isLoading = status === "streaming" || status === "submitted";
 
   const { interimTranscript, isListening, start, stop: stopVoice } =
     useVoiceInput({ agent: "HolstonAgent", name: agentName });
 
-  const pendingApproval = messages.find((m: UIMessage) =>
-    m.parts?.some((p) => {
-      if (!isToolUIPart(p)) return false;
-      return "approval" in p && (p as { state?: string }).state === "approval-requested";
-    }),
-  );
-
-  const pendingPart = pendingApproval?.parts?.find((p) => {
-    if (!isToolUIPart(p)) return false;
-    return "approval" in p && (p as { state?: string }).state === "approval-requested";
-  });
-
+  const pendingPart = findPendingApproval(messages);
   const pendingApprovalId = pendingPart && "approval" in pendingPart
     ? (pendingPart as { approval?: { id?: string } }).approval?.id
     : undefined;
-  const pendingToolName = pendingPart && isToolUIPart(pendingPart) ? getToolName(pendingPart) : undefined;
-  const pendingToolInput = pendingPart && "input" in pendingPart
-    ? (pendingPart as { input?: unknown }).input
-    : undefined;
+
+  const tabs = [
+    { value: "chat", label: "Chat", icon: ChatCircleIcon },
+    { value: "tasks", label: "Tasks", icon: LightningIcon, badge: state.reminders.length },
+    { value: "mcp", label: "MCP", icon: PlugsConnectedIcon, badge: state.mcpServers.length },
+    { value: "skills", label: "Skills", icon: SparkleIcon },
+    { value: "settings", label: "Settings", icon: GearIcon },
+  ] as const;
 
   return (
-    <div className="holston-app" data-mode={dark ? "dark" : "light"}>
+    <div className="holston-app bg-kumo-canvas text-kumo-default" data-mode={dark ? "dark" : "light"}>
       {sidebarOpen && (
-        <div className="holston-sidebar">
-          <SessionList messages={messages as UIMessage[]} onClear={() => {}} />
-        </div>
+        <aside className="w-64 shrink-0 border-r border-kumo-hairline bg-kumo-base overflow-hidden hidden md:block">
+          <SessionList messages={messages as UIMessage[]} />
+        </aside>
       )}
 
-      <div className="holston-main">
-        <div className="holston-tab-bar">
-          <TabButton active={activeTab === "chat"} onClick={() => setActiveTab("chat")}>
-            Chat
-          </TabButton>
-          <TabButton active={activeTab === "skills"} onClick={() => setActiveTab("skills")}>
-            Skills
-          </TabButton>
-          <TabButton active={activeTab === "settings"} onClick={() => setActiveTab("settings")}>
-            Settings
-          </TabButton>
-          <button
-            className="holston-tab"
-            onClick={() => setSidebarOpen(!sidebarOpen)}
-            style={{ marginLeft: "auto" }}
-          >
-            {sidebarOpen ? "Hide" : "Show"} Sidebar
-          </button>
-          <button
-            className="holston-tab"
+      <div className="flex-1 flex flex-col min-w-0">
+        <header className="flex items-center gap-2 px-3 py-2 border-b border-kumo-hairline bg-kumo-base">
+          <Button variant="ghost" size="sm" icon={SidebarIcon} onClick={() => setSidebarOpen((o) => !o)} aria-label="Toggle sidebar" />
+          <div className="flex-1 min-w-0">
+            <Tabs
+              variant="underline"
+              value={activeTab}
+              onValueChange={(v) => setActiveTab(v as Tab)}
+              tabs={tabs.map((t) => ({
+                value: t.value,
+                label: "badge" in t && t.badge ? `${t.label} (${t.badge})` : t.label,
+              }))}
+            />
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            icon={dark ? SunIcon : MoonIcon}
             onClick={() => setDark(!dark)}
-            title="Toggle theme"
-          >
-            {dark ? "Light" : "Dark"}
-          </button>
-        </div>
-
-        {activeTab === "chat" && (
-          <ChatView
-            messages={messages as UIMessage[]}
-            stop={stop}
-            sendMessage={sendMessage}
-            isLoading={isLoading}
-            isListening={isListening}
-            interimTranscript={interimTranscript}
-            onVoiceStart={start}
-            onVoiceStop={stopVoice}
+            aria-label="Toggle theme"
           />
-        )}
+        </header>
 
-        {activeTab === "skills" && <SkillsPanel />}
-        {activeTab === "settings" && <SettingsPanel />}
+        <main className="flex-1 min-h-0 overflow-hidden">
+          {activeTab === "chat" && (
+            <ChatView
+              messages={messages as UIMessage[]}
+              stop={stop}
+              sendMessage={sendMessage}
+              isLoading={isLoading}
+              isListening={isListening}
+              interimTranscript={interimTranscript}
+              onVoiceStart={start}
+              onVoiceStop={stopVoice}
+            />
+          )}
+          {activeTab === "tasks" && <TasksPanel agent={agent} state={state} />}
+          {activeTab === "mcp" && <McpPanel agent={agent} state={state} />}
+          {activeTab === "skills" && <SkillsPanel />}
+          {activeTab === "settings" && <SettingsPanel agent={agent} state={state} />}
+        </main>
 
-        {pendingApproval && pendingApprovalId && (
+        {pendingPart && pendingApprovalId && (
           <ToolApproval
-            toolName={pendingToolName ?? "unknown"}
-            input={pendingToolInput}
+            part={pendingPart}
             onApprove={() => addToolApprovalResponse({ id: pendingApprovalId, approved: true })}
             onReject={() => addToolApprovalResponse({ id: pendingApprovalId, approved: false })}
           />
@@ -188,21 +197,18 @@ function Workspace({
   );
 }
 
-function TabButton({
-  active,
-  onClick,
-  children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      className={`holston-tab ${active ? "holston-tab-active" : ""}`}
-      onClick={onClick}
-    >
-      {children}
-    </button>
-  );
+function findPendingApproval(messages: UIMessage[]) {
+  for (const m of messages) {
+    for (const p of m.parts ?? []) {
+      if (isToolUIPart(p) && "approval" in p && (p as { state?: string }).state === "approval-requested") {
+        return p;
+      }
+    }
+  }
+  return undefined;
 }
+
+// Re-exported so components can share the connected agent type.
+export type HolstonAgentConnection = ReturnType<
+  typeof useAgent<HolstonAgent, HolstonState>
+>;

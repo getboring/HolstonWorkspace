@@ -11,16 +11,36 @@ import {
   type ThinkMessengers,
 } from "@cloudflare/think/messengers";
 import telegramMessenger from "@cloudflare/think/messengers/telegram";
-import { getAgentByName, routeAgentEmail, routeAgentRequest } from "agents";
+import {
+  callable,
+  getAgentByName,
+  routeAgentEmail,
+  routeAgentRequest,
+  type Schedule,
+} from "agents";
 import {
   createSecureReplyEmailResolver,
   isAutoReplyEmail,
   type AgentEmail,
 } from "agents/email";
 import bundledSkills from "agents:skills";
+import { generateObject } from "ai";
 import PostalMime from "postal-mime";
 import { createWorkersAI } from "workers-ai-provider";
+import { z } from "zod";
 import { agentNameFromEmail, verifyAccessJWT, type AuthUser } from "./auth";
+import { sendPush } from "./push";
+import {
+  DEFAULT_MODEL,
+  INITIAL_STATE,
+  isApprovalMode,
+  isValidModel,
+  type HolstonSettings,
+  type HolstonState,
+  type McpServerView,
+  type PushSubscriptionRecord,
+  type ReminderView,
+} from "./shared/state";
 import { curatorHook, nudgerHook, retrieverHook } from "./skills/hooks";
 import { SkillStore } from "./skills/store";
 import { createSkillTools } from "./skills/tools";
@@ -30,43 +50,52 @@ export { ThinkMessengerStateAgent };
 const DEFAULT_AGENT = "default";
 const AGENT_CLASS = "HolstonAgent";
 const SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{1,63}$/;
+const REMINDER_CALLBACK = "runReminder";
 
-export class HolstonAgent extends Think<Env> {
+export class HolstonAgent extends Think<Env, HolstonState> {
   chatRecovery = true;
-  // MCP tools are merged into the tool set once connections are ready; wait
-  // (default 10s cap) so the first turn after a wake doesn't miss them.
   waitForMcpConnections = true;
+  initialState: HolstonState = INITIAL_STATE;
 
   #skillStore?: SkillStore;
 
   override async onStart() {
     if (this.env.MCP_SERVER_URL) {
       try {
-        // addMcpServer is idempotent for a matching name+url: registration and
-        // OAuth tokens persist in SQLite and reconnect on every wake, so this
-        // never accumulates duplicates (unlike raw this.mcp.connect()).
         await this.addMcpServer("holston-mcp", this.env.MCP_SERVER_URL);
       } catch (err) {
         console.error("[holston] MCP server registration failed:", err);
       }
     }
+    // Reconcile the synced view of MCP servers + reminders on every wake.
+    await this.syncMcpState();
+    await this.syncReminders();
+  }
+
+  /** Reject client-pushed state; all mutations go through @callable methods. */
+  override validateStateChange(_next: HolstonState, source: unknown) {
+    if (source !== "server") {
+      throw new Error("State is read-only from clients; use RPC methods.");
+    }
   }
 
   override getModel() {
-    return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.7-code",
-    );
+    const model = this.state?.settings.model ?? DEFAULT_MODEL;
+    return createWorkersAI({ binding: this.env.AI })(model);
   }
 
   override getSystemPrompt() {
-    return [
+    const base = [
       "You are Holston, a cloud-native AI agent running on Cloudflare Workers.",
       "You help with coding, research, home automation, and general tasks.",
       "You have access to workspace file tools (bash, read, write, edit, grep, find, list, delete),",
       "MCP servers, browser automation, code execution, and agent skills.",
-      "When you solve a complex problem (5+ tool calls), the system may suggest saving a skill.",
+      "You can set reminders and recurring tasks, and reach the user via Telegram, email, and push.",
+      "When you solve a complex problem (5+ tool calls), the system may propose saving a skill.",
       "Be concise, direct, and helpful. Use tools when needed but explain what you are doing.",
     ].join("\n");
+    const custom = this.state?.settings.customInstructions?.trim();
+    return custom ? `${base}\n\nUser instructions:\n${custom}` : base;
   }
 
   override getTools() {
@@ -81,16 +110,13 @@ export class HolstonAgent extends Think<Env> {
   }
 
   override getMessengers(): ThinkMessengers {
-    if (!this.env.TELEGRAM_BOT_TOKEN) {
-      return {};
-    }
+    if (!this.env.TELEGRAM_BOT_TOKEN) return {};
     if (!this.env.TELEGRAM_WEBHOOK_SECRET_TOKEN) {
       console.warn(
-        "[holston] TELEGRAM_WEBHOOK_SECRET_TOKEN missing — Telegram disabled (webhook mode requires a secret token)",
+        "[holston] TELEGRAM_WEBHOOK_SECRET_TOKEN missing — Telegram disabled",
       );
       return {};
     }
-
     return {
       telegram: telegramMessenger({
         token: this.env.TELEGRAM_BOT_TOKEN,
@@ -118,29 +144,200 @@ export class HolstonAgent extends Think<Env> {
   }
 
   override async beforeTurn(ctx: TurnContext): Promise<TurnConfig | void> {
+    if (this.state?.settings.autoSkills === false) return;
     const system = await retrieverHook(this.skillStore(), ctx);
-    if (system) {
-      return { system };
-    }
+    if (system) return { system };
   }
 
   override async onChatResponse(result: ChatResponseResult) {
     nudgerHook(this, result);
-    await curatorHook(this.skillStore(), this.env.AI, result);
+    if (this.state?.settings.autoSkills !== false) {
+      await curatorHook(this.skillStore(), this.env.AI, result);
+    }
   }
 
+  // ── Settings (synced state) ────────────────────────────────────────────
+
+  @callable()
+  async updateSettings(
+    patch: Partial<HolstonSettings>,
+  ): Promise<HolstonSettings> {
+    const current = this.state.settings;
+    const next: HolstonSettings = { ...current };
+
+    if (patch.model !== undefined) {
+      if (!isValidModel(patch.model)) throw new Error("Unknown model");
+      next.model = patch.model;
+    }
+    if (patch.autoSkills !== undefined) next.autoSkills = !!patch.autoSkills;
+    if (patch.approvalMode !== undefined) {
+      if (!isApprovalMode(patch.approvalMode)) {
+        throw new Error("Invalid approval mode");
+      }
+      next.approvalMode = patch.approvalMode;
+    }
+    if (patch.customInstructions !== undefined) {
+      next.customInstructions = String(patch.customInstructions).slice(0, 4000);
+    }
+
+    this.setState({ ...this.state, settings: next });
+    return next;
+  }
+
+  // ── MCP server management ──────────────────────────────────────────────
+
+  @callable()
+  async connectMcpServer(
+    name: string,
+    url: string,
+  ): Promise<{ id: string; state: string; authUrl?: string }> {
+    if (!/^https?:\/\//.test(url)) throw new Error("MCP URL must be http(s)");
+    const result = await this.addMcpServer(name.slice(0, 64), url);
+    await this.syncMcpState();
+    return "authUrl" in result
+      ? { id: result.id, state: result.state, authUrl: result.authUrl }
+      : { id: result.id, state: result.state };
+  }
+
+  @callable()
+  async disconnectMcpServer(id: string): Promise<{ ok: boolean }> {
+    await this.removeMcpServer(id);
+    await this.syncMcpState();
+    return { ok: true };
+  }
+
+  @callable()
+  async refreshMcpServers(): Promise<McpServerView[]> {
+    await this.syncMcpState();
+    return this.state.mcpServers;
+  }
+
+  // ── Reminders / scheduling ─────────────────────────────────────────────
+
   /**
-   * Incoming email, delivered by routeAgentEmail after the resolver has
-   * authorized the sender. The Message-ID keys idempotency so redelivery
-   * of the same email never produces a duplicate turn.
+   * Create a reminder from natural language ("remind me to call mom tomorrow
+   * at 3pm", "every weekday at 9am send a standup prompt").
+   *
+   * We use a FLAT schema (kind + optional datetime/cron) rather than the SDK's
+   * discriminated-union scheduleSchema — small Workers AI models populate a
+   * flat shape far more reliably than a nested union, which was returning
+   * `no-schedule` for clear inputs.
    */
+  @callable()
+  async createReminder(request: string): Promise<ReminderView> {
+    const now = new Date();
+    const model = createWorkersAI({ binding: this.env.AI })(DEFAULT_MODEL);
+    const { object } = await generateObject({
+      model,
+      schema: reminderParseSchema,
+      system: [
+        `The current date and time is ${now.toISOString()} (UTC).`,
+        "Extract a reminder from the user's message.",
+        "- message: what to be reminded about (imperative, no time words).",
+        '- kind: "once" for a single time, "recurring" for anything repeating.',
+        '- For "once": set datetime to a full ISO 8601 UTC timestamp in the future.',
+        '- For "recurring": set cron to a standard 5-field cron expression (UTC).',
+        "Resolve relative times (tomorrow, in 2 hours, next Monday) against the current time above.",
+      ].join("\n"),
+      prompt: request,
+    });
+
+    const message = (object.message || request).trim();
+    let schedule: Schedule<{ message: string }>;
+
+    if (object.kind === "once" && object.datetime.trim()) {
+      const date = new Date(object.datetime);
+      if (Number.isNaN(date.getTime()) || date.getTime() <= Date.now()) {
+        throw new Error(
+          "That time is in the past or unclear. Try 'tomorrow at 3pm' or 'in 2 hours'.",
+        );
+      }
+      schedule = await this.schedule(date, REMINDER_CALLBACK, { message });
+    } else if (object.kind === "recurring" && object.cron.trim()) {
+      schedule = await this.schedule(object.cron, REMINDER_CALLBACK, { message });
+    } else {
+      throw new Error(
+        "Could not parse a time from that request. Try 'tomorrow at 3pm' or 'every weekday at 9am'.",
+      );
+    }
+
+    await this.syncReminders();
+    return toReminderView(schedule);
+  }
+
+  @callable()
+  async listReminders(): Promise<ReminderView[]> {
+    await this.syncReminders();
+    return this.state.reminders;
+  }
+
+  @callable()
+  async cancelReminder(id: string): Promise<{ ok: boolean }> {
+    const ok = await this.cancelSchedule(id);
+    await this.syncReminders();
+    return { ok };
+  }
+
+  /** Schedule callback: fires the reminder across every channel we have. */
+  async runReminder(payload: { message: string }) {
+    await this.notifyUser("Reminder", payload.message, { url: "/" });
+    // Also inject it into the conversation so the model can act on it.
+    await this.submitMessages(
+      [
+        {
+          id: crypto.randomUUID(),
+          role: "user",
+          parts: [{ type: "text", text: `[Reminder] ${payload.message}` }],
+        },
+      ],
+      { metadata: { source: "reminder" } },
+    );
+    await this.syncReminders();
+  }
+
+  // ── Push notifications ─────────────────────────────────────────────────
+
+  @callable()
+  getVapidPublicKey(): string | null {
+    return this.env.VAPID_PUBLIC_KEY ?? null;
+  }
+
+  @callable()
+  async subscribePush(
+    subscription: PushSubscriptionRecord,
+  ): Promise<{ ok: boolean }> {
+    if (!subscription?.endpoint) throw new Error("Invalid subscription");
+    const exists = this.state.pushSubscriptions.some(
+      (s) => s.endpoint === subscription.endpoint,
+    );
+    if (!exists) {
+      this.setState({
+        ...this.state,
+        pushSubscriptions: [...this.state.pushSubscriptions, subscription],
+      });
+    }
+    return { ok: true };
+  }
+
+  @callable()
+  async unsubscribePush(endpoint: string): Promise<{ ok: boolean }> {
+    this.setState({
+      ...this.state,
+      pushSubscriptions: this.state.pushSubscriptions.filter(
+        (s) => s.endpoint !== endpoint,
+      ),
+    });
+    return { ok: true };
+  }
+
+  // ── Email ──────────────────────────────────────────────────────────────
+
   async onEmail(email: AgentEmail) {
     const parsed = await PostalMime.parse(await email.getRaw());
     if (isAutoReplyEmail(parsed.headers)) {
       console.log(`[holston] Ignoring auto-reply from ${email.from}`);
       return;
     }
-
     const subject = parsed.subject ?? "(no subject)";
     const body = (parsed.text ?? stripHtml(parsed.html) ?? "").trim();
 
@@ -164,6 +361,59 @@ export class HolstonAgent extends Think<Env> {
     );
   }
 
+  // ── Internal helpers ───────────────────────────────────────────────────
+
+  /**
+   * Fan a proactive message out to every channel: push (offline-capable),
+   * connected web clients (broadcast), and email if an owner address is set.
+   */
+  private async notifyUser(
+    title: string,
+    body: string,
+    opts: { url?: string } = {},
+  ) {
+    const { deadEndpoints } = await sendPush(
+      this.env,
+      this.state.pushSubscriptions,
+      { title, body, url: opts.url, tag: "holston" },
+    );
+    if (deadEndpoints.length > 0) {
+      this.setState({
+        ...this.state,
+        pushSubscriptions: this.state.pushSubscriptions.filter(
+          (s) => !deadEndpoints.includes(s.endpoint),
+        ),
+      });
+    }
+    this.broadcast(
+      JSON.stringify({ type: "notification", title, body, at: Date.now() }),
+    );
+  }
+
+  private async syncMcpState() {
+    const mcp = this.getMcpServers();
+    const views: McpServerView[] = Object.entries(mcp.servers).map(
+      ([id, server]) => ({
+        id,
+        name: server.name,
+        url: server.server_url,
+        state: server.state,
+        authUrl: server.auth_url,
+        error: server.error,
+        toolCount: mcp.tools.filter((t) => t.serverId === id).length,
+      }),
+    );
+    this.setState({ ...this.state, mcpServers: views });
+  }
+
+  private async syncReminders() {
+    const schedules = await this.listSchedules();
+    const views = schedules
+      .filter((s) => s.callback === REMINDER_CALLBACK)
+      .map((s) => toReminderView(s as Schedule<{ message: string }>));
+    this.setState({ ...this.state, reminders: views });
+  }
+
   private skillStore(): SkillStore {
     this.#skillStore ??= new SkillStore(
       this.env.SKILLS_BUCKET,
@@ -174,26 +424,59 @@ export class HolstonAgent extends Think<Env> {
   }
 }
 
+// All fields required (not optional) so small models can't skip the time —
+// the failure mode was `{message, kind:"once"}` with datetime omitted. For the
+// branch that doesn't apply, the model emits the empty-string sentinel.
+const reminderParseSchema = z.object({
+  message: z
+    .string()
+    .describe("What to be reminded about, imperative, no time words"),
+  kind: z
+    .enum(["once", "recurring"])
+    .describe("once = single time, recurring = repeats"),
+  datetime: z
+    .string()
+    .describe(
+      'When kind is "once": full ISO 8601 UTC timestamp in the future, e.g. "2026-07-15T19:00:00Z". When kind is "recurring": empty string "".',
+    ),
+  cron: z
+    .string()
+    .describe(
+      'When kind is "recurring": 5-field UTC cron expression, e.g. "0 14 * * 1-5". When kind is "once": empty string "".',
+    ),
+});
+
+function toReminderView(schedule: Schedule<{ message: string }>): ReminderView {
+  const message = schedule.payload?.message ?? "(reminder)";
+  const recurring = schedule.type === "cron" || schedule.type === "interval";
+  const nextRun = "time" in schedule ? schedule.time * 1000 : null;
+  let when: string;
+  switch (schedule.type) {
+    case "cron":
+      when = `cron: ${schedule.cron}`;
+      break;
+    case "interval":
+      when = `every ${schedule.intervalSeconds}s`;
+      break;
+    default:
+      when = nextRun ? new Date(nextRun).toLocaleString() : "scheduled";
+  }
+  return { id: schedule.id, message, when, nextRun, kind: schedule.type, recurring };
+}
+
+// ── Worker fetch/email handlers ──────────────────────────────────────────
+
 function accessConfigured(env: Env): boolean {
   return Boolean(env.TEAM_DOMAIN && env.POLICY_AUD);
 }
 
-/**
- * Defense-in-depth behind Cloudflare Access: verify the JWT Access injects.
- * When Access is not configured (local dev), requests pass with no user and
- * everything binds to the shared "default" instance.
- */
 async function authorize(
   request: Request,
   env: Env,
 ): Promise<{ user: AuthUser | null } | Response> {
-  if (!accessConfigured(env)) {
-    return { user: null };
-  }
+  if (!accessConfigured(env)) return { user: null };
   const user = await verifyAccessJWT(request, env);
-  if (!user) {
-    return new Response("Unauthorized", { status: 401 });
-  }
+  if (!user) return new Response("Unauthorized", { status: 401 });
   return { user };
 }
 
@@ -201,7 +484,6 @@ function instanceForUser(user: AuthUser | null): string {
   return user ? agentNameFromEmail(user.email) : DEFAULT_AGENT;
 }
 
-/** The agent instance that owns Telegram and scheduled-messenger traffic. */
 function ownerInstance(env: Env): string {
   return env.OWNER_EMAIL ? agentNameFromEmail(env.OWNER_EMAIL) : DEFAULT_AGENT;
 }
@@ -228,9 +510,6 @@ export default {
       });
     }
 
-    // Every agent route (WebSocket chat, voice, HTTP RPC) requires the Access
-    // JWT, and the URL's instance name must match the authenticated user's own
-    // instance — user A can never open user B's agent.
     const guardAgentRoute = async (
       req: Request,
       lobby: { name: string },
@@ -247,13 +526,8 @@ export default {
       onBeforeConnect: guardAgentRoute,
       onBeforeRequest: guardAgentRoute,
     });
-    if (agentResponse) {
-      return agentResponse;
-    }
+    if (agentResponse) return agentResponse;
 
-    // Messenger webhooks (e.g. Telegram) are handled inside the root Think
-    // agent's onRequest — forward them to the owner's instance. Authenticity
-    // is enforced by the messenger's own verifyWebhook (Telegram secret token).
     if (url.pathname.startsWith("/messengers/") && request.method === "POST") {
       const agent = await getAgentByName(env.HolstonAgent, ownerInstance(env));
       return agent.fetch(request);
@@ -321,7 +595,7 @@ export default {
       return env.ASSETS.fetch(request);
     }
 
-    if (url.pathname.startsWith("/assets/")) {
+    if (url.pathname.startsWith("/assets/") || url.pathname === "/sw.js") {
       return env.ASSETS.fetch(request);
     }
 
@@ -331,7 +605,6 @@ export default {
   async email(message: ForwardableEmailMessage, env: Env) {
     await routeAgentEmail(message, env, {
       resolver: async (email, env) => {
-        // Replies to signed outbound mail route back via HMAC verification.
         if (env.EMAIL_SIGNING_SECRET) {
           const secureResolver = createSecureReplyEmailResolver<Env>(
             env.EMAIL_SIGNING_SECRET,
@@ -346,13 +619,8 @@ export default {
           const replyRouting = await secureResolver(email, env);
           if (replyRouting) return replyRouting;
         }
-
-        // Fresh inbound mail: only allowlisted senders, each routed to their
-        // own instance (the same instance their Access web session uses).
         const from = email.from.trim().toLowerCase();
-        if (!allowedEmailSenders(env).has(from)) {
-          return null;
-        }
+        if (!allowedEmailSenders(env).has(from)) return null;
         return { agentName: AGENT_CLASS, agentId: agentNameFromEmail(from) };
       },
       onNoRoute: (email) => {
@@ -370,12 +638,8 @@ async function setupTelegramWebhook(
   env: Env,
 ): Promise<Response> {
   if (!env.TELEGRAM_BOT_TOKEN) {
-    return Response.json(
-      { error: "TELEGRAM_BOT_TOKEN not set" },
-      { status: 400 },
-    );
+    return Response.json({ error: "TELEGRAM_BOT_TOKEN not set" }, { status: 400 });
   }
-
   const url = new URL(request.url);
   const webhookUrl = `${url.origin}/messengers/telegram/webhook`;
   const response = await fetch(
@@ -391,7 +655,6 @@ async function setupTelegramWebhook(
       method: "POST",
     },
   );
-
   const result = await response.json();
   return Response.json(
     { ok: response.ok, result, webhookUrl },

@@ -7,18 +7,20 @@
 
 ## What It Does
 
-- **Agent loop** via Think + Workers AI (kimi-k2.7-code, zero API keys)
-- **Self-improving skills** (auto-create from experience via LLM curator, vector retrieval, in-flight patching)
-- **Multi-platform messaging** (Telegram, Email, WebSocket chat)
+- **Agent loop** via Think + Workers AI (model chosen live from Settings, zero API keys)
+- **Self-improving skills** (LLM curator proposes skills after complex turns → staged for your approval → vector retrieval)
+- **Client-managed MCP** (add/remove/authenticate MCP servers from the UI, live tool counts and OAuth handoff — no more single hardcoded env var)
+- **Reminders & recurring tasks** (natural-language scheduling: "every weekday at 9am"; fires across push, Telegram, email, and the chat)
+- **Web Push** (VAPID; reach the user with reminders and proactive messages even when the tab is closed)
+- **Synced settings** (model, auto-skills, tool-approval mode, custom instructions — stored on the agent, drive every turn)
+- **Multi-platform messaging** (Telegram, Email in + out, WebSocket chat)
 - **Scheduled tasks** (declarative cron DSL: daily digest, weekly skill review)
 - **Workspace tools** (bash, read, write, edit, grep, find, list, delete)
-- **MCP client** (connects to MCP servers on startup, auto-discovers tools)
 - **Voice input** (STT dictation via @cloudflare/voice)
-- **Reasoning traces** (show/hide toggle on assistant messages)
-- **Cloudflare Access** (JWT auth at edge, per-user agent isolation)
-- **Dark mode** (toggle with localStorage persistence)
-- **Tool approval** (modal for destructive operations)
-- **Tool output display** (running, done, rejected states in chat)
+- **Reasoning traces** (collapsible on assistant messages)
+- **Cloudflare Access** (JWT auth at edge, per-user agent isolation, state read-only from clients)
+- **Kumo UI** (Cloudflare's design system — accessible, themed, light/dark)
+- **Tool approval** (Kumo dialog for gated operations)
 - **Error boundary** (graceful error handling)
 
 ## Quick Start
@@ -34,15 +36,30 @@ npm run typecheck   # TypeScript check
 ## Architecture
 
 ```
-src/server.ts          HolstonAgent (Think) + Worker fetch/email handler
+src/server.ts          HolstonAgent (Think) with synced state + @callable RPC + Worker fetch/email
+src/shared/state.ts    HolstonState contract shared by server + client (settings, reminders, MCP, push)
+src/push.ts            Web Push (VAPID) send helper, dead-subscription pruning
 src/auth.ts            Cloudflare Access JWT verification
-src/skills/store.ts    R2 + Vectorize skill CRUD with embeddings
+src/skills/store.ts    R2 + Vectorize skill CRUD (approved/) + curator staging (pending/)
 src/skills/hooks.ts    beforeTurn (retriever) + onChatResponse (nudger + curator)
 src/skills/tools.ts    skill_create, skill_patch, skill_load, skill_list, skill_search
-src/app.tsx            React app (chat, skills, settings, dark mode, voice)
-src/components/        ChatView, SessionList, SkillsPanel, SettingsPanel, ToolApproval, ErrorBoundary
+src/app.tsx            React app shell (Kumo Tabs, Toasty, typed agent stub)
+src/lib/push.ts        Client-side push subscribe (service worker + VAPID)
+src/components/        ChatView, TasksPanel, McpPanel, SkillsPanel, SettingsPanel, ToolApproval, SessionList (all Kumo)
+public/sw.js           Push service worker
 skills/                Bundled SKILL.md files (agents:skills)
 ```
+
+## @callable RPC (client ↔ agent over WebSocket)
+
+The UI drives the agent through typed RPC (`agent.stub.*`), not env vars or local state:
+
+| Method | Purpose |
+|--------|---------|
+| `updateSettings(patch)` | Model, auto-skills, approval mode, custom instructions (synced state) |
+| `connectMcpServer(name, url)` / `disconnectMcpServer(id)` / `refreshMcpServers()` | Manage MCP servers; OAuth returns an `authUrl` |
+| `createReminder(text)` / `listReminders()` / `cancelReminder(id)` | Natural-language scheduling |
+| `getVapidPublicKey()` / `subscribePush(sub)` / `unsubscribePush(endpoint)` | Web Push subscription |
 
 ## Endpoints
 
@@ -94,9 +111,28 @@ When Cloudflare Access is not configured (`TEAM_DOMAIN`/`POLICY_AUD` unset, e.g.
 
 ### MCP Server
 
+An optional startup default; users add more from the **MCP** tab in the UI.
+
 ```bash
-npx wrangler secret put MCP_SERVER_URL   # https://your-mcp-server.com/sse
+npx wrangler secret put MCP_SERVER_URL   # https://your-mcp-server.com/mcp
 ```
+
+### Push Notifications
+
+```bash
+npx web-push generate-vapid-keys         # generate a key pair
+npx wrangler secret put VAPID_PUBLIC_KEY
+npx wrangler secret put VAPID_PRIVATE_KEY
+npx wrangler secret put VAPID_SUBJECT    # mailto:you@example.com
+```
+
+Users enable push from the **Tasks** tab. Without VAPID keys, reminders still
+fire in-app and via Telegram/email — only browser push is disabled.
+
+### Outbound Email (optional)
+
+Uncomment the `send_email` binding in `wrangler.jsonc` and set a verified sender
+in Cloudflare Email Routing to let the agent send/reply to email.
 
 ### CI/CD
 

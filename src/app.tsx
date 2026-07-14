@@ -1,8 +1,8 @@
 import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
-import { getToolName, isToolUIPart } from "ai";
-import type { UIMessage } from "ai";
-import { useState, useEffect, type ReactNode } from "react";
+import { useVoiceInput } from "@cloudflare/voice/react";
+import { getToolName, isToolUIPart, type UIMessage } from "ai";
+import { useState, useEffect, useRef, type ReactNode } from "react";
 import { ChatView } from "./components/ChatView";
 import { SessionList } from "./components/SessionList";
 import { SkillsPanel } from "./components/SkillsPanel";
@@ -44,6 +44,16 @@ export function App() {
   } as never);
 
   const isLoading = status === "streaming" || status === "submitted";
+
+  const { transcript, interimTranscript, isListening, start, stop: stopVoice } =
+    useVoiceInput({ agent: "HolstonAgent" } as never);
+
+  const transcriptRef = useRef("");
+  useEffect(() => {
+    if (transcript && transcript !== transcriptRef.current) {
+      transcriptRef.current = transcript;
+    }
+  }, [transcript]);
 
   const pendingApproval = messages.find((m: UIMessage) =>
     m.parts?.some((p) => {
@@ -106,6 +116,10 @@ export function App() {
             stop={stop}
             sendMessage={sendMessage as never}
             isLoading={isLoading}
+            isListening={isListening}
+            interimTranscript={interimTranscript}
+            onVoiceStart={start}
+            onVoiceStop={stopVoice}
           />
         )}
 

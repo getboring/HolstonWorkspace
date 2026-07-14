@@ -28,11 +28,20 @@ export function SessionList({ messages, onClear }: SessionListProps) {
     setSessions([currentSession]);
   }, [messages]);
 
+  const handleNew = () => {
+    if (messages.length > 0 && typeof window !== "undefined") {
+      if (window.confirm("Start a new conversation? Current chat will be cleared from view.")) {
+        onClear();
+        window.location.reload();
+      }
+    }
+  };
+
   return (
     <div className="holston-sidebar-content">
       <div className="holston-sidebar-header">
         <h2 className="holston-sidebar-title">Holston Workspace</h2>
-        <button className="holston-btn holston-btn-ghost" onClick={onClear} title="Clear conversation">
+        <button className="holston-btn holston-btn-ghost" onClick={handleNew} title="New conversation">
           + New
         </button>
       </div>

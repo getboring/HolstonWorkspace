@@ -7,6 +7,10 @@ interface ChatViewProps {
   stop: () => void;
   sendMessage: (msg: { text: string }) => void;
   isLoading: boolean;
+  isListening: boolean;
+  interimTranscript: string | null;
+  onVoiceStart: () => void;
+  onVoiceStop: () => void;
 }
 
 export function ChatView({
@@ -14,10 +18,15 @@ export function ChatView({
   stop,
   sendMessage,
   isLoading,
+  isListening,
+  interimTranscript,
+  onVoiceStart,
+  onVoiceStop,
 }: ChatViewProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const [localInput, setLocalInput] = useState("");
+  const [showReasoning, setShowReasoning] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -27,11 +36,41 @@ export function ChatView({
     if (!isLoading && inputRef.current) inputRef.current.focus();
   }, [isLoading]);
 
+  useEffect(() => {
+    if (interimTranscript) {
+      setLocalInput(interimTranscript);
+    }
+  }, [interimTranscript]);
+
+  useEffect(() => {
+    if (!isListening && interimTranscript === null && transcriptRef.current) {
+      setLocalInput(transcriptRef.current);
+      transcriptRef.current = "";
+    }
+  }, [isListening, interimTranscript]);
+
+  const transcriptRef = useRef("");
+
+  useEffect(() => {
+    if (isListening && interimTranscript) {
+      transcriptRef.current = (transcriptRef.current + " " + interimTranscript).trim();
+    }
+  }, [isListening, interimTranscript]);
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!localInput.trim() || isLoading) return;
     sendMessage({ text: localInput } as never);
     setLocalInput("");
+    transcriptRef.current = "";
+  };
+
+  const handleVoiceToggle = () => {
+    if (isListening) {
+      onVoiceStop();
+    } else {
+      onVoiceStart();
+    }
   };
 
   return (
@@ -44,7 +83,14 @@ export function ChatView({
         )}
 
         {messages.map((message) => (
-          <Message key={message.id} message={message} />
+          <Message
+            key={message.id}
+            message={message}
+            showReasoning={showReasoning[message.id] ?? false}
+            onToggleReasoning={() =>
+              setShowReasoning((prev) => ({ ...prev, [message.id]: !prev[message.id] }))
+            }
+          />
         ))}
 
         {isLoading && (
@@ -58,12 +104,20 @@ export function ChatView({
 
       <form onSubmit={handleSubmit} className="holston-composer">
         <div className="holston-input-row">
+          <button
+            type="button"
+            className={`holston-btn holston-btn-voice ${isListening ? "holston-btn-voice-active" : ""}`}
+            onClick={handleVoiceToggle}
+            title={isListening ? "Stop voice input" : "Start voice input"}
+          >
+            {isListening ? "Stop" : "Voice"}
+          </button>
           <input
             ref={inputRef}
             type="text"
             value={localInput}
             onChange={(e) => setLocalInput(e.target.value)}
-            placeholder="Message Holston..."
+            placeholder={isListening ? "Listening..." : "Message Holston..."}
             className="holston-input"
             disabled={isLoading}
           />
@@ -82,19 +136,50 @@ export function ChatView({
   );
 }
 
-function Message({ message }: { message: UIMessage }) {
+function Message({
+  message,
+  showReasoning,
+  onToggleReasoning,
+}: {
+  message: UIMessage;
+  showReasoning: boolean;
+  onToggleReasoning: () => void;
+}) {
   const isUser = message.role === "user";
 
   const textParts = message.parts?.filter((p) => p.type === "text") as
     | Array<{ type: "text"; text: string }>
     | undefined;
 
+  const reasoningParts = message.parts?.filter((p) => p.type === "reasoning") as
+    | Array<{ type: "reasoning"; text?: string; reasoning?: string } | { type: string; reasoning?: string }>
+    | undefined;
+
   const toolParts = message.parts?.filter((p) => isToolUIPart(p)) as
     | Array<{ type: string; state?: string; input?: unknown; output?: unknown; approval?: { id?: string } }>
     | undefined;
 
+  const hasReasoning = reasoningParts && reasoningParts.length > 0;
+
   return (
     <div className={`holston-message ${isUser ? "holston-message-user" : "holston-message-assistant"}`}>
+      {hasReasoning && (
+        <div className="holston-reasoning">
+          <button className="holston-reasoning-toggle" onClick={onToggleReasoning}>
+            {showReasoning ? "Hide" : "Show"} reasoning
+          </button>
+          {showReasoning && (
+            <div className="holston-reasoning-body">
+              {reasoningParts!.map((part, i) => (
+                <p key={i}>
+                  {(part as { reasoning?: string }).reasoning ?? (part as { text?: string }).text}
+                </p>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {textParts?.map((part, i) => (
         <Streamdown key={i}>{part.text}</Streamdown>
       ))}

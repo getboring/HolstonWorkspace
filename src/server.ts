@@ -20,6 +20,14 @@ const DEFAULT_AGENT = "default";
 export class HolstonAgent extends Think<Env> {
   chatRecovery = true;
 
+  override onStart() {
+    if (this.env.MCP_SERVER_URL) {
+      this.mcp.connect(this.env.MCP_SERVER_URL).catch((err: unknown) =>
+        console.error("[holston] MCP connect failed:", err)
+      );
+    }
+  }
+
   override getModel() {
     return createWorkersAI({ binding: this.env.AI })(
       "@cf/moonshotai/kimi-k2.7-code",
@@ -152,7 +160,7 @@ export default {
     if (request.method === "GET" && url.pathname === "/api/skills") {
       const store = new SkillStore(env.SKILLS_BUCKET, env.SKILLS_INDEX, env.AI);
       const all = await store.list();
-      return Response.json({ skills: all });
+      return Response.json({ skills: all }, { headers: { "access-control-allow-origin": "*" } });
     }
 
     if (url.pathname === "/" || url.pathname === "/index.html") {

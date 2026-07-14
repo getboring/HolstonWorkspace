@@ -6,6 +6,8 @@ interface Env {
   HolstonAgent: DurableObjectNamespace<import("./src/server").HolstonAgent>;
   SKILLS_BUCKET: R2Bucket;
   SKILLS_INDEX: VectorizeIndex;
+  LOADER: WorkerLoader;
+  BROWSER: import("agents/browser").BrowserBinding;
   TEAM_DOMAIN?: string;
   POLICY_AUD?: string;
   OWNER_EMAIL?: string;

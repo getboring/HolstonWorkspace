@@ -43,6 +43,12 @@
       "index_name": "holston-skills-v1"
     }
   ],
+  // Code execution: Codemode runs LLM-generated code in an isolated Worker via
+  // WorkerLoader. Powers the `execute` tool (state.* workspace, cdp.* browser).
+  "worker_loaders": [{ "binding": "LOADER" }],
+  // Headless browser for the execute tool's cdp.* connectors (navigate,
+  // screenshot, extract). Cloudflare Browser Rendering.
+  "browser": { "binding": "BROWSER" },
   // Outbound email (agent replies / notifications). Requires a verified
   // sender in Cloudflare Email Routing. Uncomment once configured.
   // "send_email": [{ "name": "EMAIL", "destination_address": "you@example.com" }],

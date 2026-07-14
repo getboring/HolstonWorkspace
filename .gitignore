@@ -6,3 +6,4 @@ dist/
 .env
 .dev.vars
 env.d.ts.bak.claude/
+.claude/

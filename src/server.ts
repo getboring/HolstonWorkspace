@@ -18,6 +18,9 @@ import {
   type ThinkMessengers,
 } from "@cloudflare/think/messengers";
 import telegramMessenger from "@cloudflare/think/messengers/telegram";
+import { createBrowserTools } from "@cloudflare/think/tools/browser";
+import { createExecuteTool } from "@cloudflare/think/tools/execute";
+import { CodemodeRuntime } from "@cloudflare/codemode";
 import {
   callable,
   getAgentByName,
@@ -31,7 +34,7 @@ import {
   type AgentEmail,
 } from "agents/email";
 import bundledSkills from "agents:skills";
-import { generateObject, generateText } from "ai";
+import { generateObject, generateText, type ToolSet } from "ai";
 import PostalMime from "postal-mime";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
@@ -64,7 +67,9 @@ import { curatorHook, nudgerHook, retrieverHook } from "./skills/hooks";
 import { SkillStore } from "./skills/store";
 import { createSkillTools } from "./skills/tools";
 
-export { ThinkMessengerStateAgent };
+// The Codemode runtime must be exported from the Worker entry so the
+// WorkerLoader can instantiate it for the execute tool.
+export { ThinkMessengerStateAgent, CodemodeRuntime };
 
 const DEFAULT_AGENT = "default";
 const AGENT_CLASS = "HolstonAgent";
@@ -158,11 +163,24 @@ export class HolstonAgent extends Think<Env, HolstonState> {
   }
 
   override getSystemPrompt() {
+    // Only advertise capabilities that are actually wired, so the model never
+    // claims a tool it doesn't have.
+    const capabilities = [
+      "workspace file tools (bash, read, write, edit, grep, find, list, delete)",
+      "MCP servers",
+    ];
+    if (this.env.LOADER) {
+      capabilities.push("code execution (run generated code in a sandbox)");
+    }
+    if (this.env.BROWSER) {
+      capabilities.push("browser automation (navigate, screenshot, extract)");
+    }
+    capabilities.push("agent skills");
+
     const base = [
       "You are Holston, a cloud-native AI agent running on Cloudflare Workers.",
       "You help with coding, research, home automation, and general tasks.",
-      "You have access to workspace file tools (bash, read, write, edit, grep, find, list, delete),",
-      "MCP servers, browser automation, code execution, and agent skills.",
+      `You have access to ${capabilities.join(", ")}.`,
       "You can set reminders and recurring tasks, and reach the user via Telegram, email, and push.",
       "When you solve a complex problem (5+ tool calls), the system may propose saving a skill.",
       "Be concise, direct, and helpful. Use tools when needed but explain what you are doing.",
@@ -175,7 +193,27 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     // Skill-write tools honor approvalMode: gated in always/destructive-only,
     // ungated in never. (Skill writes are treated as destructive.)
     const gated = this.state?.settings.approvalMode !== "never";
-    return createSkillTools(this.skillStore(), this, gated);
+    const tools: ToolSet = createSkillTools(this.skillStore(), this, gated);
+
+    // Cloudflare-native code execution (Codemode): runs model-generated code in
+    // an isolated Worker via LOADER, with state.* (the DO workspace), tools.*,
+    // and cdp.* (headless browser) when BROWSER is bound. The one-liner pulls
+    // all of that from `this`.
+    if (this.env.LOADER) {
+      tools.execute = createExecuteTool(this);
+    }
+    // Standalone browser-automation tools (navigate/screenshot/extract) for the
+    // model to drive Browser Rendering directly.
+    if (this.env.BROWSER) {
+      Object.assign(
+        tools,
+        createBrowserTools({
+          browser: this.env.BROWSER,
+          loader: this.env.LOADER,
+        }),
+      );
+    }
+    return tools;
   }
 
   override getSkills() {
@@ -588,6 +626,17 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     const subject = parsed.subject ?? "(no subject)";
     const body = (parsed.text ?? stripHtml(parsed.html) ?? "").trim();
 
+    // Classify before spending a full model turn: skip spam and reply only when
+    // the email actually warrants one (prevents cost spirals on notifications).
+    const triage = await classifyEmail(this.env.AI, subject, body).catch(
+      () => null,
+    );
+    if (triage?.classification === "spam") {
+      console.log(`[holston] Dropping spam email from ${email.from}`);
+      return;
+    }
+    const shouldReply = triage?.shouldReply ?? true;
+
     // Process as a blocking turn so we can reply with the model's answer.
     const result = await this.saveMessages([
       {
@@ -602,8 +651,9 @@ export class HolstonAgent extends Think<Env, HolstonState> {
       },
     ]);
 
-    // Reply with the assistant's answer, when available and configured.
-    if (result.status === "completed") {
+    // Reply with the assistant's answer, when the triage said so and it's
+    // available and configured.
+    if (result.status === "completed" && shouldReply) {
       const answer = lastAssistantText(this.messages);
       if (answer && this.env.EMAIL) {
         try {
@@ -778,6 +828,38 @@ const reminderParseSchema = z.object({
       'When kind is "recurring": 5-field LOCAL cron expression, e.g. "0 9 * * 1-5". When kind is "once": empty string "".',
     ),
 });
+
+const emailTriageSchema = z.object({
+  classification: z
+    .enum(["actionable", "notification", "spam"])
+    .describe("actionable = needs a reply; notification = FYI only; spam = junk"),
+  shouldReply: z
+    .boolean()
+    .describe("Whether a reply is warranted (false for notifications/spam)"),
+  summary: z.string().max(200).describe("One-line summary of the email"),
+});
+
+/**
+ * Lightweight AI triage before spending a full turn on an email: drop spam,
+ * and only reply when the email actually asks for something.
+ */
+async function classifyEmail(
+  ai: Ai,
+  subject: string,
+  body: string,
+): Promise<{ classification: "actionable" | "notification" | "spam"; shouldReply: boolean; summary: string }> {
+  const model = createWorkersAI({ binding: ai })(DEFAULT_MODEL);
+  const { object } = await generateObject({
+    model,
+    schema: emailTriageSchema,
+    system:
+      "Triage an inbound email. Classify it and decide whether a reply is warranted. " +
+      "Notifications, receipts, and automated alerts are 'notification' with shouldReply false. " +
+      "Unsolicited marketing or scams are 'spam'. Genuine questions/requests are 'actionable'.",
+    prompt: `Subject: ${subject}\n\n${body.slice(0, 2000)}`,
+  });
+  return object;
+}
 
 /** Extract the text of the most recent assistant message (for email replies). */
 function lastAssistantText(

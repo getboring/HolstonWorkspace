@@ -12,7 +12,7 @@
 - **Browser automation** (Cloudflare Browser Rendering — navigate, screenshot, extract, scrape, via a `BROWSER` binding; an active session can be watched through a live **Live View** URL, and sessions can be recorded as replayable rrweb captures — all surfaced in the Lab tab)
 - **Workspace tools** (bash, read, write, edit, grep, find, list, delete — Think's built-in virtual filesystem over the DO's SQLite)
 - **Read-only web fetch** (allowlisted `fetch_url`: CF docs, Wikipedia, raw.githubusercontent, api.github)
-- **Self-improving skills** (LLM curator proposes skills after complex turns → staged for your approval → vector retrieval)
+- **Self-improving skills** (LLM curator proposes skills after complex turns → staged for your approval → vector retrieval; success/fail counters now update from real turn outcomes so ranking learns, and you can author/edit/delete skills directly in the UI)
 - **Client-managed MCP** (add/remove/authenticate MCP servers from the UI, live tool counts and OAuth handoff — no more single hardcoded env var)
 - **Holston as an MCP server** (publishes its own capabilities as tools at a bearer-gated `/mcp` — reminders, memory, history search, receipts, health — so Claude, a CLI, or another agent can drive the owner's Holston over MCP; the tools operate on the owner's real agent instance, not a stub)
 - **Reminders & recurring tasks** (natural-language scheduling in your timezone: "every weekday at 9am"; fires across push, Telegram, email, and the chat; DST drift self-corrects on wake)
@@ -91,8 +91,9 @@ The UI drives the agent through typed RPC (`agent.stub.*`), not env vars or loca
 | `listReceipts(limit)` / `listReceiptsPage({limit,cursor})` / `exportReceipts()` | Immutable action-receipt ledger — capped list, keyset page, NDJSON export (Receipts tab) |
 | `listEvents({limit,cursor,severities})` / `exportEvents()` | System Health event log — paginated, severity-filtered, NDJSON export (Health tab) |
 | `listSnippets()` / `saveSnippet(name,execId,desc)` / `deleteSnippet(name)` | Codemode snippets — promote a working execution to a reusable named snippet (Lab tab); saves are receipted |
-| `listExecutions(limit)` | Codemode execution audit trail — what code ran and how it ended (Lab tab) |
-| `browserLiveView()` / `browserRecording(sessionId)` | Live View URLs for an active browser session; rrweb replay of a finished one (Lab tab) |
+| `listExecutions(limit)` / `listPendingActions(execId)` / `rollbackExecution(execId)` | Codemode audit trail, what a paused run awaits, and rollback (approve/reject use Think's built-ins) |
+| `browserLiveView()` / `browserRecording(sessionId)` | Live View URLs for an active browser session; downloadable rrweb recording of a finished one (Lab tab) |
+| `saveSkill({name,description,triggers,body})` / `deleteSkillByName(name)` | Author/edit or delete an approved skill directly (Skills tab), reusing the store + embedding |
 | `getUsage()` | Today's AI-call budget snapshot (Settings meter) |
 | `searchHistory(query,limit)` | Full-text search over conversation history (sidebar) |
 | `getMemory()` / `setMemory(content)` | Read / replace the durable `memory` context block (editable Memory card) |

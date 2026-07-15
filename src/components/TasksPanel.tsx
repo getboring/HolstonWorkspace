@@ -14,7 +14,7 @@ import {
 import { useState } from "react";
 import type { HolstonAgentConnection } from "../app";
 import type { HolstonState, ReminderView } from "../shared/state";
-import { enablePush } from "../lib/push";
+import { disablePush, enablePush } from "../lib/push";
 
 export function TasksPanel({
   agent,
@@ -51,11 +51,23 @@ export function TasksPanel({
     }
   };
 
+  const pushOn = state.pushSubscriptions.length > 0 || pushState === "on";
+
   const turnOnPush = async () => {
     setPushState("enabling");
     try {
       const ok = await enablePush(agent);
       setPushState(ok ? "on" : "error");
+    } catch {
+      setPushState("error");
+    }
+  };
+
+  const turnOffPush = async () => {
+    setPushState("enabling");
+    try {
+      await disablePush(agent);
+      setPushState("idle");
     } catch {
       setPushState("error");
     }
@@ -72,7 +84,19 @@ export function TasksPanel({
           </Text>
         </div>
 
-        {pushState !== "on" && (
+        {pushOn ? (
+          <Banner
+            variant="default"
+            icon={<BellIcon />}
+            action={
+              <Button size="sm" variant="ghost" loading={pushState === "enabling"} onClick={turnOffPush}>
+                Disable
+              </Button>
+            }
+          >
+            Browser push is on — Holston can reach you even when this tab is closed.
+          </Banner>
+        ) : (
           <Banner
             variant="default"
             icon={<BellIcon />}

@@ -89,6 +89,23 @@ export class SkillStore {
   }
 
   /**
+   * Record the outcome of a turn that used this skill — the feedback signal the
+   * retriever ranks on. Bumps success_count or fail_count only; deliberately
+   * does NOT re-embed or bump the version (the skill content didn't change, and
+   * re-embedding on every use would be wasteful). No-op if the skill is gone.
+   */
+  async recordOutcome(name: string, ok: boolean): Promise<void> {
+    const existing = await this.get(name);
+    if (!existing) return;
+    const updated: SkillRecord = {
+      ...existing,
+      successCount: existing.successCount + (ok ? 1 : 0),
+      failCount: existing.failCount + (ok ? 0 : 1),
+    };
+    await this.writeSkill(updated);
+  }
+
+  /**
    * Stage a curator-proposed skill for human approval. Overwrites any prior
    * pending draft with the same name; never touches the approved skill.
    */

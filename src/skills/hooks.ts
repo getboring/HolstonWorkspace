@@ -90,6 +90,40 @@ export function nudgerHook(agent: AgentSql, result: ChatResponseResult): void {
   }
 }
 
+/**
+ * onChatResponse: record success/fail for every skill the turn actually loaded
+ * (via `skill_load`), so the retriever's ranking learns from real outcomes
+ * instead of sitting at a permanent 0/0. A completed turn counts as success for
+ * each loaded skill; a failed/errored turn counts as a failure. Best-effort —
+ * a store write failure must never break the response.
+ */
+export async function outcomeHook(
+  store: SkillStore,
+  result: ChatResponseResult,
+): Promise<void> {
+  const loaded = loadedSkillNames(result.message);
+  if (loaded.size === 0) return;
+  const ok = result.status === "completed";
+  for (const name of loaded) {
+    try {
+      await store.recordOutcome(name, ok);
+    } catch (err) {
+      console.error(`[skills] Failed to record outcome for ${name}:`, err);
+    }
+  }
+}
+
+/** Skill names loaded via `skill_load` in this turn (deduped). */
+function loadedSkillNames(message: UIMessage): Set<string> {
+  const names = new Set<string>();
+  for (const call of extractToolCalls(message)) {
+    if (call.toolName !== "skill_load") continue;
+    const name = (call.input as { name?: unknown } | undefined)?.name;
+    if (typeof name === "string" && name) names.add(name);
+  }
+  return names;
+}
+
 const skillExtractionSchema = z.object({
   shouldCreate: z
     .boolean()

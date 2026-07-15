@@ -56,10 +56,13 @@ import { sendPush } from "./push";
 import { ReceiptStore, type Receipt, type ReceiptPage } from "./receipts";
 import { UsageMeter, type UsageSnapshot } from "./usage";
 import {
+  DEFAULT_DAILY_CALL_LIMIT,
   DEFAULT_MODEL,
   DEFAULT_SETTINGS,
   DEFAULT_TIMEZONE,
   INITIAL_STATE,
+  MAX_DAILY_CALL_LIMIT,
+  MIN_DAILY_CALL_LIMIT,
   isApprovalMode,
   isValidModel,
   isValidTimezone,
@@ -67,13 +70,14 @@ import {
   type BrowserRecordingResult,
   type ExecutionView,
   type HolstonSettings,
+  type PendingActionView,
   type HolstonState,
   type McpServerView,
   type PushSubscriptionRecord,
   type ReminderView,
   type SnippetView,
 } from "./shared/state";
-import { curatorHook, nudgerHook, retrieverHook } from "./skills/hooks";
+import { curatorHook, nudgerHook, outcomeHook, retrieverHook } from "./skills/hooks";
 import { SkillStore } from "./skills/store";
 import { createSkillTools } from "./skills/tools";
 
@@ -317,11 +321,26 @@ export class HolstonAgent extends Think<Env, HolstonState> {
   }
 
   /**
-   * Grant action permissions per turn. Web + messenger + email turns are the
-   * owner acting, so grant all permissions; anything else gets none (read-only).
+   * Grant action permissions per turn, scoped to who is actually driving it.
+   * Interactive owner channels (web, messenger, voice) and inbound email are
+   * the owner acting, so they get every action. A channel-less turn is an
+   * owner-allowlisted email turn — also granted. This is the write-path's
+   * authority gate: it exists so that if a non-owner turn is ever introduced
+   * (a shared read-only link, a sub-agent), the grant narrows rather than
+   * defaulting open. Today every ingress is owner-gated, so the effective grant
+   * is full — but the gate is real, not a bare `true`.
    */
   override authorizeTurn(_ctx: TurnContext): ActionAuthorizationDecision {
-    return true;
+    const channel = this.activeChannel?.kind;
+    // Known owner-driven interactive channels.
+    if (channel === "web" || channel === "messenger" || channel === "voice") {
+      return true;
+    }
+    // No channel = inbound email (sender is allowlisted in handleEmail). Grant.
+    if (!channel) return true;
+    // An unrecognized channel (e.g. a future "custom" non-owner surface): the
+    // turn runs, but with zero action permissions — read-only.
+    return { allowed: true, grantedPermissions: [] };
   }
 
   /**
@@ -407,16 +426,23 @@ export class HolstonAgent extends Think<Env, HolstonState> {
         "Daily AI budget reached. It resets at midnight UTC. Raise the limit in Settings if this is expected.",
       );
     }
+    // Record the spend HERE, before the turn runs — so a turn that crashes
+    // (overflow, rate-limit, tool error) before onChatResponse still counts.
+    // The meter is the backstop for exactly those failure loops, so it must not
+    // leak on them.
+    this.usageMeter().record();
+    this.syncUsage();
+
     if (this.state?.settings.autoSkills === false) return;
     const system = await retrieverHook(this.skillStore(), ctx);
     if (system) return { system };
   }
 
   override async onChatResponse(result: ChatResponseResult) {
-    // Count this turn against the daily budget.
-    this.usageMeter().record();
-    this.syncUsage();
     nudgerHook(this, result);
+    // Feed the skill-ranking signal: record success/fail for skills this turn
+    // loaded, so the retriever's ranking actually learns.
+    await outcomeHook(this.skillStore(), result);
     if (this.state?.settings.autoSkills !== false) {
       await curatorHook(this.skillStore(), this.env.AI, result);
     }
@@ -528,8 +554,20 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     if (patch.browserRecording !== undefined) {
       next.browserRecording = !!patch.browserRecording;
     }
+    if (patch.dailyCallLimit !== undefined) {
+      const n = Math.round(Number(patch.dailyCallLimit));
+      if (!Number.isFinite(n) || n < MIN_DAILY_CALL_LIMIT || n > MAX_DAILY_CALL_LIMIT) {
+        throw new Error(
+          `Daily call limit must be between ${MIN_DAILY_CALL_LIMIT} and ${MAX_DAILY_CALL_LIMIT}.`,
+        );
+      }
+      next.dailyCallLimit = n;
+    }
 
     this.setState({ ...this.state, settings: next });
+    // The usage snapshot's `limit` reflects settings — refresh it so the UI
+    // meter updates immediately when the ceiling changes.
+    this.syncUsage();
     return next;
   }
 
@@ -716,6 +754,71 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     return { ok: true };
   }
 
+  // ── Manual skills management (approved skills, from the UI) ──────────────
+
+  /**
+   * Create or overwrite an approved skill directly (the human-authored path,
+   * alongside the model's skill_create and the curator's proposals). Receipted.
+   */
+  @callable()
+  async saveSkill(input: {
+    name: string;
+    description: string;
+    triggers: string[];
+    body: string;
+  }): Promise<{ ok: boolean; error?: string }> {
+    const name = String(input?.name ?? "").trim();
+    if (!SKILL_NAME_PATTERN.test(name)) {
+      return { ok: false, error: "Name must be kebab-case (letters, digits, hyphens)." };
+    }
+    const description = String(input.description ?? "").slice(0, 200);
+    const body = String(input.body ?? "").slice(0, 8000);
+    if (description.length < 10 || body.length < 20) {
+      return { ok: false, error: "Description (10+) and body (20+) are required." };
+    }
+    const triggers = Array.isArray(input.triggers)
+      ? input.triggers.map((t) => String(t).slice(0, 120)).filter(Boolean).slice(0, 10)
+      : [];
+    try {
+      const store = this.skillStore();
+      const existing = await store.get(name);
+      if (existing) {
+        await store.patch(name, { description, triggers, body });
+      } else {
+        await store.create({ name, description, triggers, body });
+      }
+      this.receiptStore().write({
+        action: "save_skill",
+        idempotencyKey: null,
+        input: { name, description },
+        output: { saved: true, updated: !!existing },
+        actor: this.name,
+      });
+      this.syncReceiptCount();
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : "Save failed" };
+    }
+  }
+
+  /** Delete an approved skill (and its embedding) by name. Receipted. */
+  @callable()
+  async deleteSkillByName(name: string): Promise<{ ok: boolean }> {
+    const store = this.skillStore();
+    const existing = await store.get(String(name));
+    if (!existing) return { ok: false };
+    await store.delete(String(name));
+    this.receiptStore().write({
+      action: "remove_skill",
+      idempotencyKey: `skill:delete:${name}`,
+      input: { name },
+      output: { removed: true },
+      actor: this.name,
+    });
+    this.syncReceiptCount();
+    return { ok: true };
+  }
+
   // ── Email ──────────────────────────────────────────────────────────────
 
   async onEmail(email: AgentEmail) {
@@ -756,7 +859,25 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     // available and configured.
     if (result.status === "completed" && shouldReply) {
       const answer = lastAssistantText(this.messages);
-      if (answer && this.env.EMAIL) {
+      if (!answer) {
+        // Triage wanted a reply but the turn produced no text (e.g. only tool
+        // calls). Log it so a warranted reply that silently dropped is visible.
+        this.logEvent(
+          "warning",
+          "email",
+          "email:reply_empty",
+          "Triage flagged a reply but the turn produced no reply text.",
+          { subject },
+        );
+      } else if (!this.env.EMAIL) {
+        this.logEvent(
+          "warning",
+          "email",
+          "email:reply_unconfigured",
+          "A reply was warranted but the send_email binding is not configured.",
+          { subject },
+        );
+      } else {
         try {
           await this.replyToEmail(email, {
             fromName: "Holston",
@@ -894,7 +1015,12 @@ export class HolstonAgent extends Think<Env, HolstonState> {
   }
 
   private usageMeter(): UsageMeter {
-    this.#usageMeter ??= new UsageMeter(this);
+    // Limit is a live getter so changing it in Settings takes effect without
+    // rebuilding the cached meter.
+    this.#usageMeter ??= new UsageMeter(
+      this,
+      () => this.state?.settings.dailyCallLimit ?? DEFAULT_DAILY_CALL_LIMIT,
+    );
     return this.#usageMeter;
   }
 
@@ -903,11 +1029,21 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     return this.#eventLog;
   }
 
+  /**
+   * Bump the revision counter so panels that fetch on-demand data (receipts,
+   * health events, snippets, executions) refetch when it changes — turning the
+   * manual Refresh buttons into automatic updates after a server-side write.
+   */
+  private bumpRevision() {
+    this.setState({ ...this.state, revision: (this.state.revision ?? 0) + 1 });
+  }
+
   private syncReceiptCount() {
     // Touch the store first so the table exists (its constructor creates it).
     const count = this.receiptStore().count();
     if (count !== this.state.receiptCount) {
       this.setState({ ...this.state, receiptCount: count });
+      this.bumpRevision();
     }
   }
 
@@ -921,6 +1057,10 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     if (unhealthy !== this.state.healthAlerts) {
       this.setState({ ...this.state, healthAlerts: unhealthy });
     }
+    // Always bump: event count of the same severity tier can change (e.g. a new
+    // warning) without moving the error+critical badge, and the Health panel
+    // should still refetch.
+    this.bumpRevision();
   }
 
   /** Record an operational event to System Health and refresh the badge. */
@@ -1017,7 +1157,7 @@ export class HolstonAgent extends Think<Env, HolstonState> {
         idempotencyKey: `snippet:${clean}`,
         input: { name: clean, executionId, description },
         output: { name: snippet.name, savedAt: snippet.savedAt },
-        actor: "owner",
+        actor: this.name,
       });
       this.syncReceiptCount();
       return { ok: true };
@@ -1040,6 +1180,45 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     if (!this.codemode) return [];
     const rows = await this.codemode.executions(Math.min(Math.max(limit, 1), 100));
     return rows.map(toExecutionView);
+  }
+
+  /**
+   * Actions a paused execution is waiting on. Think exposes `approveExecution`
+   * and `rejectExecution` natively (both client-callable, and they replace the
+   * paused transcript part + auto-continue the chat — so the UI calls those
+   * directly). This just surfaces WHAT is pending so the operator can decide.
+   */
+  @callable()
+  async listPendingActions(executionId: string): Promise<PendingActionView[]> {
+    if (!this.codemode) return [];
+    const pending = await this.codemode.pending(String(executionId));
+    return pending.map((p) => ({
+      executionId: p.executionId,
+      seq: p.seq,
+      connector: p.connector,
+      method: p.method,
+      args: p.args,
+    }));
+  }
+
+  /** Roll back a completed execution's applied actions (not a Think built-in). */
+  @callable()
+  async rollbackExecution(executionId: string): Promise<{ ok: boolean; error?: string }> {
+    if (!this.codemode) return { ok: false, error: "Code execution is not enabled." };
+    try {
+      await this.codemode.rollback({ executionId: String(executionId) });
+      this.receiptStore().write({
+        action: "rollback_execution",
+        idempotencyKey: `exec:rollback:${executionId}`,
+        input: { executionId },
+        output: { rolledBack: true },
+        actor: this.name,
+      });
+      this.syncReceiptCount();
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : "Rollback failed" };
+    }
   }
 
   // ── Browser Live View + recording (finding #3) ─────────────────────────
@@ -1138,8 +1317,18 @@ export class HolstonAgent extends Think<Env, HolstonState> {
         createdAt: r.createdAt,
       }));
     } catch (err) {
+      // Don't swallow into an empty result (indistinguishable from "no
+      // matches"). Record it to System Health and rethrow so the search UI can
+      // show a real error state instead of a false "no results".
       console.warn("[holston] history search failed:", err);
-      return [];
+      this.logEvent(
+        "warning",
+        "history",
+        "history:search_failed",
+        "Conversation history search failed.",
+        { query: q.slice(0, 80), error: String(err) },
+      );
+      throw new Error("History search is unavailable right now.");
     }
   }
 

@@ -56,10 +56,20 @@ describe("shiftCronToUtc", () => {
     expect(shiftCronToUtc("0 22 * * *", NY)).toBe("0 2 * * *");
   });
 
-  it("leaves non-simple hour fields unchanged (wildcard/step/range/list)", () => {
+  it("leaves a wildcard hour unchanged (every local hour is every UTC hour)", () => {
     expect(shiftCronToUtc("*/15 * * * *", NY)).toBe("*/15 * * * *");
-    expect(shiftCronToUtc("0 9-17 * * *", NY)).toBe("0 9-17 * * *");
-    expect(shiftCronToUtc("0 8,12 * * *", NY)).toBe("0 8,12 * * *");
+  });
+
+  it("shifts each hour in a comma list (9,17 ET summer -> 13,21 UTC)", () => {
+    expect(shiftCronToUtc("0 8,12 * * *", NY)).toBe("0 12,16 * * *");
+    // wrap: 22 + 4 = 26 -> 2
+    expect(shiftCronToUtc("0 20,22 * * *", NY)).toBe("0 0,2 * * *");
+  });
+
+  it("refuses step/range hour fields rather than firing at the wrong time", () => {
+    // These cross the offset boundary in ways a simple add can't express.
+    expect(shiftCronToUtc("0 9-17 * * *", NY)).toBeNull();
+    expect(shiftCronToUtc("0 */2 * * *", NY)).toBeNull();
   });
 
   it("returns null for malformed cron", () => {

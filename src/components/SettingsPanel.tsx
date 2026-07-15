@@ -5,6 +5,7 @@ import { Text } from "@cloudflare/kumo/components/text";
 import { Field } from "@cloudflare/kumo/components/field";
 import { Button } from "@cloudflare/kumo/components/button";
 import { Banner } from "@cloudflare/kumo/components/banner";
+import { Input } from "@cloudflare/kumo/components/input";
 import { Meter } from "@cloudflare/kumo/components/meter";
 import { WarningIcon } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
@@ -29,7 +30,13 @@ export function SettingsPanel({
   const [instructions, setInstructions] = useState(s.customInstructions);
   const [dirty, setDirty] = useState(false);
   const [savingInstructions, setSavingInstructions] = useState(false);
+  const [limitDraft, setLimitDraft] = useState(String(s.dailyCallLimit));
   const [error, setError] = useState<string | null>(null);
+
+  // Keep the limit input in sync with server state when not mid-edit.
+  useEffect(() => {
+    setLimitDraft(String(s.dailyCallLimit));
+  }, [s.dailyCallLimit]);
 
   // Adopt a server-side change only when the user isn't mid-edit, so an
   // unrelated state sync never clobbers an in-progress draft.
@@ -79,6 +86,26 @@ export function SettingsPanel({
                 <Text variant="error" size="sm">Daily AI budget reached — resets at midnight UTC.</Text>
               </div>
             )}
+            <div className="mt-3 flex items-end gap-2">
+              <div className="w-40">
+                <Input
+                  label="Daily limit"
+                  type="number"
+                  min={10}
+                  max={100000}
+                  value={String(limitDraft)}
+                  onChange={(e) => setLimitDraft(e.target.value)}
+                />
+              </div>
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={Number(limitDraft) === s.dailyCallLimit || !limitDraft}
+                onClick={() => patch({ dailyCallLimit: Number(limitDraft) })}
+              >
+                Save limit
+              </Button>
+            </div>
           </Surface>
         )}
 
@@ -108,7 +135,7 @@ export function SettingsPanel({
           <div className="flex items-start justify-between gap-4">
             <div>
               <Text>Record browser sessions</Text>
-              <Text variant="secondary" size="sm">Capture browser automation as replayable rrweb recordings. View live sessions and replays in the Lab tab. Playback needs Cloudflare API credentials.</Text>
+              <Text variant="secondary" size="sm">Capture browser automation as rrweb recordings. Watch live sessions and download finished recordings in the Lab tab. Download needs Cloudflare API credentials.</Text>
             </div>
             <Switch checked={s.browserRecording} onCheckedChange={(v) => patch({ browserRecording: v })} aria-label="Record browser sessions" />
           </div>

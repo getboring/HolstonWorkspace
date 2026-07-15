@@ -145,15 +145,24 @@ function Workspace({ agentName, dark, setDark }: { agentName: string; dark: bool
   return (
     <div className="holston-app bg-kumo-canvas text-kumo-default" data-mode={dark ? "dark" : "light"}>
       {sidebarOpen && (
-        <aside className="w-64 shrink-0 border-r border-kumo-hairline bg-kumo-base overflow-hidden hidden md:block">
-          <SessionList agent={agent} messages={messages as UIMessage[]} />
-        </aside>
+        <>
+          {/* Mobile: dim + tap-to-close backdrop behind the drawer. */}
+          <button
+            type="button"
+            aria-label="Close sidebar"
+            className="fixed inset-0 z-20 bg-black/30 md:hidden"
+            onClick={() => setSidebarOpen(false)}
+          />
+          <aside className="fixed inset-y-0 left-0 z-30 w-64 border-r border-kumo-hairline bg-kumo-base overflow-hidden md:static md:z-auto md:shrink-0">
+            <SessionList agent={agent} messages={messages as UIMessage[]} />
+          </aside>
+        </>
       )}
 
       <div className="flex-1 flex flex-col min-w-0">
         <header className="flex items-center gap-2 px-3 py-2 border-b border-kumo-hairline bg-kumo-base">
           <Button variant="ghost" size="sm" icon={SidebarIcon} onClick={() => setSidebarOpen((o) => !o)} aria-label="Toggle sidebar" />
-          <div className="flex-1 min-w-0">
+          <div className="flex-1 min-w-0 overflow-x-auto holston-scroll">
             <Tabs
               variant="underline"
               value={activeTab}
@@ -190,10 +199,10 @@ function Workspace({ agentName, dark, setDark }: { agentName: string; dark: bool
           )}
           {activeTab === "tasks" && <TasksPanel agent={agent} state={state} />}
           {activeTab === "mcp" && <McpPanel agent={agent} state={state} />}
-          {activeTab === "skills" && <SkillsPanel />}
+          {activeTab === "skills" && <SkillsPanel agent={agent} />}
           {activeTab === "lab" && <LabPanel agent={agent} state={state} />}
-          {activeTab === "receipts" && <ReceiptsPanel agent={agent} />}
-          {activeTab === "health" && <HealthPanel agent={agent} />}
+          {activeTab === "receipts" && <ReceiptsPanel agent={agent} revision={state.revision} />}
+          {activeTab === "health" && <HealthPanel agent={agent} revision={state.revision} />}
           {activeTab === "settings" && <SettingsPanel agent={agent} state={state} />}
         </main>
 

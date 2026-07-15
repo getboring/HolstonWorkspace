@@ -14,7 +14,13 @@ import type { HolstonAgentConnection } from "../app";
 import { downloadText } from "../lib/download";
 import type { ReceiptView } from "../shared/state";
 
-export function ReceiptsPanel({ agent }: { agent: HolstonAgentConnection }) {
+export function ReceiptsPanel({
+  agent,
+  revision,
+}: {
+  agent: HolstonAgentConnection;
+  revision?: number;
+}) {
   const [receipts, setReceipts] = useState<ReceiptView[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
@@ -38,6 +44,9 @@ export function ReceiptsPanel({ agent }: { agent: HolstonAgentConnection }) {
   }, [agent]);
 
   useEffect(() => { load(); }, [load]);
+  // Refetch the first page when the agent signals derived data changed.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: revision is the trigger; load is stable.
+  useEffect(() => { if (revision) load(); }, [revision]);
 
   const loadMore = async () => {
     if (!cursor) return;

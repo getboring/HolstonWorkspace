@@ -1,5 +1,6 @@
 import { action, type Action } from "@cloudflare/think";
 import { z } from "zod";
+import { shouldApprove } from "./core/tool-policy";
 import type { ReceiptStore } from "./receipts";
 import type { ApprovalMode } from "./shared/state";
 
@@ -24,6 +25,8 @@ export interface ActionDeps {
   deleteSkill: (name: string) => Promise<boolean>;
   /** Current approval mode, so "always" forces approval on every action. */
   approvalMode: ApprovalMode;
+  /** Per-tool approval overrides. */
+  toolApprovals?: Record<string, "always" | "never">;
 }
 
 const skillNameSchema = z
@@ -33,13 +36,10 @@ const skillNameSchema = z
   .regex(/^[a-z0-9-]+$/, "lowercase, alphanumeric, hyphens only");
 
 export function createActions(deps: ActionDeps): Record<string, Action> {
-  // "always" mode forces every action behind approval; "destructive-only"
-  // gates medium/high-risk ones; "never" leaves the per-action default.
-  const gate = (risk: "low" | "medium" | "high"): boolean | undefined => {
-    if (deps.approvalMode === "always") return true;
-    if (deps.approvalMode === "never") return false;
-    return risk === "low" ? undefined : true; // destructive-only
-  };
+  // Approval decision comes from the shared tool-policy (src/core/tool-policy),
+  // keyed by the action's own name — one source of truth across every gate.
+  const gate = (name: string): boolean =>
+    shouldApprove(name, deps.approvalMode, deps.toolApprovals);
 
   const receipt = (name: string, key: string | null, input: unknown, output: unknown) =>
     deps.receipts.write({
@@ -70,7 +70,7 @@ export function createActions(deps: ActionDeps): Record<string, Action> {
         input.ref ? `send:${input.ref}` : `send:${crypto.randomUUID()}`,
       permissions: ["notify:send"],
       approvalRisk: "low",
-      approval: gate("low"),
+      approval: gate("send_message"),
       execute: async ({ title, body, ref }) => {
         await deps.notify(title, body);
         const output = { delivered: true, at: new Date().toISOString() };
@@ -95,7 +95,7 @@ export function createActions(deps: ActionDeps): Record<string, Action> {
       idempotencyKey: ({ input }) => `reminder:${input.request}`,
       permissions: ["reminder:write"],
       approvalRisk: "low",
-      approval: gate("low"),
+      approval: gate("set_reminder"),
       execute: async ({ request }) => {
         const summary = await deps.createReminder(request);
         const output = { scheduled: summary };
@@ -115,7 +115,7 @@ export function createActions(deps: ActionDeps): Record<string, Action> {
       idempotencyKey: ({ input }) => `memory:${input.fact}`,
       permissions: ["memory:write"],
       approvalRisk: "low",
-      approval: gate("low"),
+      approval: gate("save_memory"),
       execute: async ({ fact }) => {
         await deps.saveMemory(fact);
         const output = { remembered: fact };
@@ -132,7 +132,7 @@ export function createActions(deps: ActionDeps): Record<string, Action> {
       idempotencyKey: ({ input }) => `remove-skill:${input.name}`,
       permissions: ["skill:write"],
       approvalRisk: "medium",
-      approval: gate("medium"),
+      approval: gate("remove_skill"),
       execute: async ({ name }) => {
         const existed = await deps.deleteSkill(name);
         const output = { removed: existed, name };

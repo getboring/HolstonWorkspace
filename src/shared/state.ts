@@ -24,8 +24,10 @@ export interface HolstonSettings {
   model: WorkersAiModelId;
   /** Curator proposes skills after complex turns (staged for approval). */
   autoSkills: boolean;
-  /** Governs the tool-approval gate surfaced to the user. */
+  /** Baseline tool-approval policy applied by risk tier. */
   approvalMode: ApprovalMode;
+  /** Per-tool overrides that win over approvalMode ("always" | "never"). */
+  toolApprovals: Record<string, "always" | "never">;
   /** IANA timezone for reminders and wall-clock schedules (e.g. America/New_York). */
   timezone: string;
   /** Extra instruction appended to the system prompt (user-editable persona). */
@@ -38,6 +40,7 @@ export const DEFAULT_SETTINGS: HolstonSettings = {
   model: DEFAULT_MODEL,
   autoSkills: true,
   approvalMode: "destructive-only",
+  toolApprovals: {},
   timezone: DEFAULT_TIMEZONE,
   customInstructions: "",
 };

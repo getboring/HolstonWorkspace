@@ -9,7 +9,9 @@
     "build": "vite build",
     "deploy": "vite build && wrangler deploy",
     "typecheck": "tsc --noEmit",
-    "types": "wrangler types env.d.ts --include-runtime false"
+    "types": "wrangler types env.d.ts --include-runtime false",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@chat-adapter/telegram": "^4.31.0",
@@ -43,6 +45,7 @@
     "tailwindcss": "^4.3.2",
     "typescript": "^6.0.3",
     "vite": "^8.1.0",
+    "vitest": "4.1.10",
     "web-push": "3.6.7",
     "wrangler": "^4.110.0"
   }

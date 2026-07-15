@@ -56,10 +56,13 @@ import { sendPush } from "./push";
 import { ReceiptStore, type Receipt, type ReceiptPage } from "./receipts";
 import { UsageMeter, type UsageSnapshot } from "./usage";
 import {
+  DEFAULT_DAILY_CALL_LIMIT,
   DEFAULT_MODEL,
   DEFAULT_SETTINGS,
   DEFAULT_TIMEZONE,
   INITIAL_STATE,
+  MAX_DAILY_CALL_LIMIT,
+  MIN_DAILY_CALL_LIMIT,
   isApprovalMode,
   isValidModel,
   isValidTimezone,
@@ -73,7 +76,7 @@ import {
   type ReminderView,
   type SnippetView,
 } from "./shared/state";
-import { curatorHook, nudgerHook, retrieverHook } from "./skills/hooks";
+import { curatorHook, nudgerHook, outcomeHook, retrieverHook } from "./skills/hooks";
 import { SkillStore } from "./skills/store";
 import { createSkillTools } from "./skills/tools";
 
@@ -317,11 +320,26 @@ export class HolstonAgent extends Think<Env, HolstonState> {
   }
 
   /**
-   * Grant action permissions per turn. Web + messenger + email turns are the
-   * owner acting, so grant all permissions; anything else gets none (read-only).
+   * Grant action permissions per turn, scoped to who is actually driving it.
+   * Interactive owner channels (web, messenger, voice) and inbound email are
+   * the owner acting, so they get every action. A channel-less turn is an
+   * owner-allowlisted email turn — also granted. This is the write-path's
+   * authority gate: it exists so that if a non-owner turn is ever introduced
+   * (a shared read-only link, a sub-agent), the grant narrows rather than
+   * defaulting open. Today every ingress is owner-gated, so the effective grant
+   * is full — but the gate is real, not a bare `true`.
    */
   override authorizeTurn(_ctx: TurnContext): ActionAuthorizationDecision {
-    return true;
+    const channel = this.activeChannel?.kind;
+    // Known owner-driven interactive channels.
+    if (channel === "web" || channel === "messenger" || channel === "voice") {
+      return true;
+    }
+    // No channel = inbound email (sender is allowlisted in handleEmail). Grant.
+    if (!channel) return true;
+    // An unrecognized channel (e.g. a future "custom" non-owner surface): the
+    // turn runs, but with zero action permissions — read-only.
+    return { allowed: true, grantedPermissions: [] };
   }
 
   /**
@@ -407,16 +425,23 @@ export class HolstonAgent extends Think<Env, HolstonState> {
         "Daily AI budget reached. It resets at midnight UTC. Raise the limit in Settings if this is expected.",
       );
     }
+    // Record the spend HERE, before the turn runs — so a turn that crashes
+    // (overflow, rate-limit, tool error) before onChatResponse still counts.
+    // The meter is the backstop for exactly those failure loops, so it must not
+    // leak on them.
+    this.usageMeter().record();
+    this.syncUsage();
+
     if (this.state?.settings.autoSkills === false) return;
     const system = await retrieverHook(this.skillStore(), ctx);
     if (system) return { system };
   }
 
   override async onChatResponse(result: ChatResponseResult) {
-    // Count this turn against the daily budget.
-    this.usageMeter().record();
-    this.syncUsage();
     nudgerHook(this, result);
+    // Feed the skill-ranking signal: record success/fail for skills this turn
+    // loaded, so the retriever's ranking actually learns.
+    await outcomeHook(this.skillStore(), result);
     if (this.state?.settings.autoSkills !== false) {
       await curatorHook(this.skillStore(), this.env.AI, result);
     }
@@ -528,8 +553,20 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     if (patch.browserRecording !== undefined) {
       next.browserRecording = !!patch.browserRecording;
     }
+    if (patch.dailyCallLimit !== undefined) {
+      const n = Math.round(Number(patch.dailyCallLimit));
+      if (!Number.isFinite(n) || n < MIN_DAILY_CALL_LIMIT || n > MAX_DAILY_CALL_LIMIT) {
+        throw new Error(
+          `Daily call limit must be between ${MIN_DAILY_CALL_LIMIT} and ${MAX_DAILY_CALL_LIMIT}.`,
+        );
+      }
+      next.dailyCallLimit = n;
+    }
 
     this.setState({ ...this.state, settings: next });
+    // The usage snapshot's `limit` reflects settings — refresh it so the UI
+    // meter updates immediately when the ceiling changes.
+    this.syncUsage();
     return next;
   }
 
@@ -894,7 +931,12 @@ export class HolstonAgent extends Think<Env, HolstonState> {
   }
 
   private usageMeter(): UsageMeter {
-    this.#usageMeter ??= new UsageMeter(this);
+    // Limit is a live getter so changing it in Settings takes effect without
+    // rebuilding the cached meter.
+    this.#usageMeter ??= new UsageMeter(
+      this,
+      () => this.state?.settings.dailyCallLimit ?? DEFAULT_DAILY_CALL_LIMIT,
+    );
     return this.#usageMeter;
   }
 

@@ -19,14 +19,25 @@ export interface UsageSnapshot {
 export const DEFAULT_DAILY_CALL_LIMIT = 500;
 
 export class UsageMeter {
+  /**
+   * `dailyLimit` may be a number or a function resolving the current limit —
+   * the meter is cached on the agent, so a function lets the ceiling track a
+   * live setting without rebuilding the meter.
+   */
   constructor(
     private agent: AgentSql,
-    private dailyLimit = DEFAULT_DAILY_CALL_LIMIT,
+    private dailyLimit: number | (() => number) = DEFAULT_DAILY_CALL_LIMIT,
   ) {
     this.agent.sql`CREATE TABLE IF NOT EXISTS ai_usage (
       day TEXT PRIMARY KEY,
       calls INTEGER NOT NULL DEFAULT 0
     )`;
+  }
+
+  private limit(): number {
+    return typeof this.dailyLimit === "function"
+      ? this.dailyLimit()
+      : this.dailyLimit;
   }
 
   private today(): string {
@@ -36,15 +47,16 @@ export class UsageMeter {
   /** Current day's usage snapshot. */
   snapshot(): UsageSnapshot {
     const day = this.today();
+    const limit = this.limit();
     const rows = this.agent.sql<{ calls: number }>`
       SELECT calls FROM ai_usage WHERE day = ${day}`;
     const calls = rows[0]?.calls ?? 0;
     return {
       day,
       calls,
-      limit: this.dailyLimit,
-      remaining: Math.max(0, this.dailyLimit - calls),
-      exceeded: calls >= this.dailyLimit,
+      limit,
+      remaining: Math.max(0, limit - calls),
+      exceeded: calls >= limit,
     };
   }
 

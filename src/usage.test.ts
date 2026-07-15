@@ -52,4 +52,15 @@ describe("UsageMeter", () => {
     expect(m.canSpend()).toBe(false);
     expect(m.snapshot().exceeded).toBe(true);
   });
+
+  it("resolves the limit from a live getter (settable ceiling)", () => {
+    let limit = 2;
+    const m = new UsageMeter(fakeSql(), () => limit);
+    m.record();
+    m.record();
+    expect(m.canSpend()).toBe(false); // at the ceiling
+    limit = 10; // raise it in "Settings"
+    expect(m.canSpend()).toBe(true); // no rebuild needed
+    expect(m.snapshot().limit).toBe(10);
+  });
 });

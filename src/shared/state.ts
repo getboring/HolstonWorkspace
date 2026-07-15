@@ -34,9 +34,16 @@ export interface HolstonSettings {
   customInstructions: string;
   /** Record browser automation sessions (rrweb) for later replay. */
   browserRecording: boolean;
+  /** Max AI turns per UTC day before turns are blocked (runaway backstop). */
+  dailyCallLimit: number;
 }
 
 export const DEFAULT_TIMEZONE = "America/New_York";
+
+/** Default daily AI-turn ceiling. Bounds so the Settings input can't disable or absurdly raise it. */
+export const DEFAULT_DAILY_CALL_LIMIT = 500;
+export const MIN_DAILY_CALL_LIMIT = 10;
+export const MAX_DAILY_CALL_LIMIT = 100_000;
 
 export const DEFAULT_SETTINGS: HolstonSettings = {
   model: DEFAULT_MODEL,
@@ -46,6 +53,7 @@ export const DEFAULT_SETTINGS: HolstonSettings = {
   timezone: DEFAULT_TIMEZONE,
   customInstructions: "",
   browserRecording: false,
+  dailyCallLimit: DEFAULT_DAILY_CALL_LIMIT,
 };
 
 /** Common IANA timezones offered in the Settings UI. */

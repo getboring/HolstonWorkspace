@@ -2,6 +2,7 @@ import { getAgentByName, routeAgentEmail, routeAgentRequest } from "agents";
 import { createSecureReplyEmailResolver } from "agents/email";
 import { agentNameFromEmail, verifyAccessJWT, type AuthUser } from "../auth";
 import { assertSameOrigin } from "../core/csrf";
+import { handleMcp } from "../mcp";
 import { SkillStore } from "../skills/store";
 
 export const DEFAULT_AGENT = "default";
@@ -44,8 +45,12 @@ function allowedEmailSenders(env: Env): Set<string> {
   return senders;
 }
 
-/** The Worker fetch handler: health, agent routing (guarded), setup, skills HTTP API. */
-export async function handleFetch(request: Request, env: Env): Promise<Response> {
+/** The Worker fetch handler: health, MCP server, agent routing (guarded), setup, skills HTTP API. */
+export async function handleFetch(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
   const url = new URL(request.url);
 
   if (url.pathname === "/health") {
@@ -55,6 +60,11 @@ export async function handleFetch(request: Request, env: Env): Promise<Response>
       timestamp: new Date().toISOString(),
     });
   }
+
+  // Holston published as an MCP server: bearer-gated (MCP_ACCESS_KEY), its own
+  // auth path independent of Cloudflare Access. Returns null for non-/mcp paths.
+  const mcpResponse = await handleMcp(request, env, ctx);
+  if (mcpResponse) return mcpResponse;
 
   // Every agent route (WebSocket chat, voice, HTTP RPC) requires the Access
   // JWT, and the URL's instance name must match the authenticated user's.

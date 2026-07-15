@@ -14,6 +14,7 @@
 - **Read-only web fetch** (allowlisted `fetch_url`: CF docs, Wikipedia, raw.githubusercontent, api.github)
 - **Self-improving skills** (LLM curator proposes skills after complex turns → staged for your approval → vector retrieval)
 - **Client-managed MCP** (add/remove/authenticate MCP servers from the UI, live tool counts and OAuth handoff — no more single hardcoded env var)
+- **Holston as an MCP server** (publishes its own capabilities as tools at a bearer-gated `/mcp` — reminders, memory, history search, receipts, health — so Claude, a CLI, or another agent can drive the owner's Holston over MCP; the tools operate on the owner's real agent instance, not a stub)
 - **Reminders & recurring tasks** (natural-language scheduling in your timezone: "every weekday at 9am"; fires across push, Telegram, email, and the chat; DST drift self-corrects on wake)
 - **Web Push** (VAPID; reach the user with reminders and proactive messages even when the tab is closed)
 - **Actions with receipts** (gated server actions — send_message, set_reminder, save_memory, remove_skill — following the Boring Stack write-path: validate → idempotency → authorize → execute → immutable receipt; the Receipts tab paginates the ledger and exports it as NDJSON)
@@ -51,6 +52,8 @@ src/server.ts          HolstonAgent (Think): synced state, @callable RPC, getToo
 src/actions.ts         Think action() tools (send_message, set_reminder, save_memory, remove_skill)
 src/receipts.ts        Immutable append-only receipt ledger in DO SQLite (UNIQUE + read index, keyset pagination, NDJSON export)
 src/events.ts          Persistent System Health log (agent_events SQLite: severity/source/kind, cursor pagination, bounded retention, export)
+src/mcp.ts             Holston published AS an MCP server (McpServer + createMcpHandler at /mcp; tools drive the owner instance via a DO stub)
+src/lib/bearer.ts      Pure bearer-token gate for the /mcp endpoint (unit-tested)
 src/usage.ts           UsageMeter — per-DO daily AI-call budget in SQLite
 src/observability.ts   diagnostics_channel subscriptions (schedule / chat / fiber / mcp) → event sink (persist + notify on critical)
 src/shared/state.ts    HolstonState contract shared by server + client
@@ -101,6 +104,7 @@ Actions the model can call (compiled into tools via `getActions()`): `send_messa
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | GET | `/health` | public | Health check |
+| POST/GET | `/mcp` | `MCP_ACCESS_KEY` bearer | Holston's own MCP server (Streamable HTTP); tools drive the owner's agent instance |
 | GET | `/` | Access JWT | Web dashboard (React app, `run_worker_first`) |
 | GET | `/setup/info` | Access JWT | Agent instance name + auth status |
 | POST | `/setup/telegram-webhook` | Access JWT | Register Telegram webhook |
@@ -144,13 +148,29 @@ When Cloudflare Access is not configured (`TEAM_DOMAIN`/`POLICY_AUD` unset, e.g.
 1. Dashboard > Email > Routing > Routes
 2. Forward to Worker: `holston-workspace`
 
-### MCP Server
+### MCP Server (client — connecting to others)
 
 An optional startup default; users add more from the **MCP** tab in the UI.
 
 ```bash
 npx wrangler secret put MCP_SERVER_URL   # https://your-mcp-server.com/mcp
 ```
+
+### MCP Server (server — exposing Holston)
+
+Holston also *publishes* an MCP server at `/mcp` (Streamable HTTP) so another
+agent can drive it. The endpoint is closed unless a bearer key is set; the tools
+operate on the owner's real agent instance (`OWNER_EMAIL`).
+
+```bash
+npx wrangler secret put MCP_ACCESS_KEY   # a long random bearer token
+```
+
+Connect from any MCP client with the URL `https://<worker>/mcp` and header
+`Authorization: Bearer <MCP_ACCESS_KEY>`. Tools: `list_reminders`,
+`create_reminder`, `cancel_reminder`, `get_memory`, `save_memory`,
+`search_history`, `list_receipts`, `system_health`. Writes go through the same
+idempotency/receipt path as the dashboard.
 
 ### Push Notifications
 

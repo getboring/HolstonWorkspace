@@ -47,6 +47,7 @@ import { handleEmail, handleFetch } from "./lib/worker";
 import { subscribeObservability } from "./observability";
 import { sendPush } from "./push";
 import { ReceiptStore, type Receipt } from "./receipts";
+import { UsageMeter, type UsageSnapshot } from "./usage";
 import {
   DEFAULT_MODEL,
   DEFAULT_SETTINGS,
@@ -105,6 +106,7 @@ export class HolstonAgent extends Think<Env, HolstonState> {
 
   #skillStore?: SkillStore;
   #receiptStore?: ReceiptStore;
+  #usageMeter?: UsageMeter;
   #obsDisposer?: () => void;
 
   override async onStart() {
@@ -121,6 +123,7 @@ export class HolstonAgent extends Think<Env, HolstonState> {
       this.setState({ ...this.state, settings: merged });
     }
     this.syncReceiptCount();
+    this.syncUsage();
 
     if (this.env.MCP_SERVER_URL) {
       try {
@@ -332,12 +335,22 @@ export class HolstonAgent extends Think<Env, HolstonState> {
   }
 
   override async beforeTurn(ctx: TurnContext): Promise<TurnConfig | void> {
+    // Daily AI budget: a runaway agent (email loop, hammering MCP) hits a
+    // ceiling instead of draining the account's Workers AI budget.
+    if (!this.usageMeter().canSpend()) {
+      throw new Error(
+        "Daily AI budget reached. It resets at midnight UTC. Raise the limit in Settings if this is expected.",
+      );
+    }
     if (this.state?.settings.autoSkills === false) return;
     const system = await retrieverHook(this.skillStore(), ctx);
     if (system) return { system };
   }
 
   override async onChatResponse(result: ChatResponseResult) {
+    // Count this turn against the daily budget.
+    this.usageMeter().record();
+    this.syncUsage();
     nudgerHook(this, result);
     if (this.state?.settings.autoSkills !== false) {
       await curatorHook(this.skillStore(), this.env.AI, result);
@@ -370,6 +383,13 @@ export class HolstonAgent extends Think<Env, HolstonState> {
       )
     ) {
       return "context_overflow";
+    }
+    // Workers AI rate limiting (429 / capacity). Surfaced so the failure is
+    // classified rather than a generic error.
+    const status = (error as { statusCode?: number; status?: number })?.statusCode
+      ?? (error as { status?: number })?.status;
+    if (status === 429 || /rate.?limit|too many requests|capacity|429/i.test(haystack)) {
+      return "rate_limit";
     }
   }
 
@@ -791,12 +811,21 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     return this.#receiptStore;
   }
 
+  private usageMeter(): UsageMeter {
+    this.#usageMeter ??= new UsageMeter(this);
+    return this.#usageMeter;
+  }
+
   private syncReceiptCount() {
     // Touch the store first so the table exists (its constructor creates it).
     const count = this.receiptStore().count();
     if (count !== this.state.receiptCount) {
       this.setState({ ...this.state, receiptCount: count });
     }
+  }
+
+  private syncUsage() {
+    this.setState({ ...this.state, usage: this.usageMeter().snapshot() });
   }
 
   /** Append a durable fact to the writable `memory` context block. */
@@ -817,6 +846,53 @@ export class HolstonAgent extends Think<Env, HolstonState> {
   @callable()
   getMemory(): string {
     return this.session.getContextBlock("memory")?.content ?? "";
+  }
+
+  /** Replace the entire memory block (user editing/correcting remembered facts). */
+  @callable()
+  async setMemory(content: string): Promise<{ ok: boolean }> {
+    await this.session.replaceContextBlock("memory", String(content).slice(0, 8000));
+    await this.session.refreshSystemPrompt();
+    return { ok: true };
+  }
+
+  /** Today's AI usage snapshot (drives the Settings budget banner). */
+  @callable()
+  getUsage(): UsageSnapshot {
+    return this.usageMeter().snapshot();
+  }
+
+  /** Full-text search over this conversation's history (the FTS5 `history` block). */
+  @callable()
+  async searchHistory(
+    query: string,
+    limit = 10,
+  ): Promise<Array<{ id: string; role: string; content: string; createdAt?: string }>> {
+    const q = String(query ?? "").trim();
+    if (q.length < 2) return [];
+    try {
+      const results = await this.session.search(q, { limit });
+      return results.map((r) => ({
+        id: r.id,
+        role: r.role,
+        content: r.content,
+        createdAt: r.createdAt,
+      }));
+    } catch (err) {
+      console.warn("[holston] history search failed:", err);
+      return [];
+    }
+  }
+
+  /** The tool names each connected MCP server exposes (so the user can audit them). */
+  @callable()
+  listMcpTools(): Record<string, string[]> {
+    const mcp = this.getMcpServers();
+    const byServer: Record<string, string[]> = {};
+    for (const tool of mcp.tools) {
+      (byServer[tool.serverId] ??= []).push(tool.name);
+    }
+    return byServer;
   }
 }
 

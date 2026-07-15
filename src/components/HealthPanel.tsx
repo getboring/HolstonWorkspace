@@ -33,7 +33,13 @@ const SEVERITIES_FOR: Record<Filter, EventSeverity[] | undefined> = {
   critical: ["critical"],
 };
 
-export function HealthPanel({ agent }: { agent: HolstonAgentConnection }) {
+export function HealthPanel({
+  agent,
+  revision,
+}: {
+  agent: HolstonAgentConnection;
+  revision?: number;
+}) {
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
@@ -62,6 +68,9 @@ export function HealthPanel({ agent }: { agent: HolstonAgentConnection }) {
   }, [agent, filter]);
 
   useEffect(() => { load(); }, [load]);
+  // Refetch when the agent signals a health event was logged.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: revision is the trigger; load is stable.
+  useEffect(() => { if (revision) load(); }, [revision]);
 
   const loadMore = async () => {
     if (!cursor) return;

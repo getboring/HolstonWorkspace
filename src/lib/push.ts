@@ -41,3 +41,24 @@ export async function enablePush(agent: HolstonAgentConnection): Promise<boolean
   await agent.stub.subscribePush(subscription.toJSON() as never);
   return true;
 }
+
+/**
+ * Unsubscribe the browser push subscription and tell the agent to drop the
+ * stored endpoint, so a user who turned push on can turn it back off from the
+ * app (not only via browser settings). Best-effort: unregisters whatever this
+ * browser has and clears the matching endpoint server-side.
+ */
+export async function disablePush(agent: HolstonAgentConnection): Promise<boolean> {
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) return false;
+  try {
+    const registration = await navigator.serviceWorker.ready;
+    const existing = await registration.pushManager.getSubscription();
+    if (existing) {
+      await agent.stub.unsubscribePush(existing.endpoint);
+      await existing.unsubscribe();
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}

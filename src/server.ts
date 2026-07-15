@@ -754,6 +754,71 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     return { ok: true };
   }
 
+  // ── Manual skills management (approved skills, from the UI) ──────────────
+
+  /**
+   * Create or overwrite an approved skill directly (the human-authored path,
+   * alongside the model's skill_create and the curator's proposals). Receipted.
+   */
+  @callable()
+  async saveSkill(input: {
+    name: string;
+    description: string;
+    triggers: string[];
+    body: string;
+  }): Promise<{ ok: boolean; error?: string }> {
+    const name = String(input?.name ?? "").trim();
+    if (!SKILL_NAME_PATTERN.test(name)) {
+      return { ok: false, error: "Name must be kebab-case (letters, digits, hyphens)." };
+    }
+    const description = String(input.description ?? "").slice(0, 200);
+    const body = String(input.body ?? "").slice(0, 8000);
+    if (description.length < 10 || body.length < 20) {
+      return { ok: false, error: "Description (10+) and body (20+) are required." };
+    }
+    const triggers = Array.isArray(input.triggers)
+      ? input.triggers.map((t) => String(t).slice(0, 120)).filter(Boolean).slice(0, 10)
+      : [];
+    try {
+      const store = this.skillStore();
+      const existing = await store.get(name);
+      if (existing) {
+        await store.patch(name, { description, triggers, body });
+      } else {
+        await store.create({ name, description, triggers, body });
+      }
+      this.receiptStore().write({
+        action: "save_skill",
+        idempotencyKey: null,
+        input: { name, description },
+        output: { saved: true, updated: !!existing },
+        actor: this.name,
+      });
+      this.syncReceiptCount();
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : "Save failed" };
+    }
+  }
+
+  /** Delete an approved skill (and its embedding) by name. Receipted. */
+  @callable()
+  async deleteSkillByName(name: string): Promise<{ ok: boolean }> {
+    const store = this.skillStore();
+    const existing = await store.get(String(name));
+    if (!existing) return { ok: false };
+    await store.delete(String(name));
+    this.receiptStore().write({
+      action: "remove_skill",
+      idempotencyKey: `skill:delete:${name}`,
+      input: { name },
+      output: { removed: true },
+      actor: this.name,
+    });
+    this.syncReceiptCount();
+    return { ok: true };
+  }
+
   // ── Email ──────────────────────────────────────────────────────────────
 
   async onEmail(email: AgentEmail) {
@@ -946,11 +1011,21 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     return this.#eventLog;
   }
 
+  /**
+   * Bump the revision counter so panels that fetch on-demand data (receipts,
+   * health events, snippets, executions) refetch when it changes — turning the
+   * manual Refresh buttons into automatic updates after a server-side write.
+   */
+  private bumpRevision() {
+    this.setState({ ...this.state, revision: (this.state.revision ?? 0) + 1 });
+  }
+
   private syncReceiptCount() {
     // Touch the store first so the table exists (its constructor creates it).
     const count = this.receiptStore().count();
     if (count !== this.state.receiptCount) {
       this.setState({ ...this.state, receiptCount: count });
+      this.bumpRevision();
     }
   }
 
@@ -964,6 +1039,10 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     if (unhealthy !== this.state.healthAlerts) {
       this.setState({ ...this.state, healthAlerts: unhealthy });
     }
+    // Always bump: event count of the same severity tier can change (e.g. a new
+    // warning) without moving the error+critical badge, and the Health panel
+    // should still refetch.
+    this.bumpRevision();
   }
 
   /** Record an operational event to System Health and refresh the badge. */

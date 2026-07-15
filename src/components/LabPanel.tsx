@@ -71,8 +71,8 @@ export function LabPanel({
           </Text>
         </div>
         <BrowserSection agent={agent} state={state} />
-        <ExecutionsSection agent={agent} />
-        <SnippetsSection agent={agent} />
+        <ExecutionsSection agent={agent} revision={state.revision} />
+        <SnippetsSection agent={agent} revision={state.revision} />
       </div>
     </div>
   );
@@ -215,7 +215,7 @@ function BrowserSection({
 }
 
 /* ── Codemode executions (audit) with save-as-snippet ─────────────────── */
-function ExecutionsSection({ agent }: { agent: HolstonAgentConnection }) {
+function ExecutionsSection({ agent, revision }: { agent: HolstonAgentConnection; revision?: number }) {
   const [rows, setRows] = useState<ExecutionView[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -236,6 +236,8 @@ function ExecutionsSection({ agent }: { agent: HolstonAgentConnection }) {
   }, [agent]);
 
   useEffect(() => { load(); }, [load]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: revision is the trigger; load is stable.
+  useEffect(() => { if (revision) load(); }, [revision]);
 
   const save = async (executionId: string) => {
     const clean = name.trim();
@@ -353,7 +355,7 @@ function ExecutionsSection({ agent }: { agent: HolstonAgentConnection }) {
 }
 
 /* ── Saved snippets ───────────────────────────────────────────────────── */
-function SnippetsSection({ agent }: { agent: HolstonAgentConnection }) {
+function SnippetsSection({ agent, revision }: { agent: HolstonAgentConnection; revision?: number }) {
   const [snippets, setSnippets] = useState<SnippetView[] | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -369,6 +371,8 @@ function SnippetsSection({ agent }: { agent: HolstonAgentConnection }) {
   }, [agent]);
 
   useEffect(() => { load(); }, [load]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: revision is the trigger; load is stable.
+  useEffect(() => { if (revision) load(); }, [revision]);
 
   const remove = async (n: string) => {
     await agent.stub.deleteSnippet(n);

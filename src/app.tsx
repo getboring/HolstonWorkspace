@@ -190,10 +190,10 @@ function Workspace({ agentName, dark, setDark }: { agentName: string; dark: bool
           )}
           {activeTab === "tasks" && <TasksPanel agent={agent} state={state} />}
           {activeTab === "mcp" && <McpPanel agent={agent} state={state} />}
-          {activeTab === "skills" && <SkillsPanel />}
+          {activeTab === "skills" && <SkillsPanel agent={agent} />}
           {activeTab === "lab" && <LabPanel agent={agent} state={state} />}
-          {activeTab === "receipts" && <ReceiptsPanel agent={agent} />}
-          {activeTab === "health" && <HealthPanel agent={agent} />}
+          {activeTab === "receipts" && <ReceiptsPanel agent={agent} revision={state.revision} />}
+          {activeTab === "health" && <HealthPanel agent={agent} revision={state.revision} />}
           {activeTab === "settings" && <SettingsPanel agent={agent} state={state} />}
         </main>
 

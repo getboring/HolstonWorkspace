@@ -859,7 +859,25 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     // available and configured.
     if (result.status === "completed" && shouldReply) {
       const answer = lastAssistantText(this.messages);
-      if (answer && this.env.EMAIL) {
+      if (!answer) {
+        // Triage wanted a reply but the turn produced no text (e.g. only tool
+        // calls). Log it so a warranted reply that silently dropped is visible.
+        this.logEvent(
+          "warning",
+          "email",
+          "email:reply_empty",
+          "Triage flagged a reply but the turn produced no reply text.",
+          { subject },
+        );
+      } else if (!this.env.EMAIL) {
+        this.logEvent(
+          "warning",
+          "email",
+          "email:reply_unconfigured",
+          "A reply was warranted but the send_email binding is not configured.",
+          { subject },
+        );
+      } else {
         try {
           await this.replyToEmail(email, {
             fromName: "Holston",
@@ -1299,8 +1317,18 @@ export class HolstonAgent extends Think<Env, HolstonState> {
         createdAt: r.createdAt,
       }));
     } catch (err) {
+      // Don't swallow into an empty result (indistinguishable from "no
+      // matches"). Record it to System Health and rethrow so the search UI can
+      // show a real error state instead of a false "no results".
       console.warn("[holston] history search failed:", err);
-      return [];
+      this.logEvent(
+        "warning",
+        "history",
+        "history:search_failed",
+        "Conversation history search failed.",
+        { query: q.slice(0, 80), error: String(err) },
+      );
+      throw new Error("History search is unavailable right now.");
     }
   }
 

@@ -100,20 +100,30 @@ export function shiftCronToUtc(cron: string, timeZone: string): string | null {
     string,
     string,
   ];
-  if (
-    hour === "*" ||
-    hour.includes(",") ||
-    hour.includes("/") ||
-    hour.includes("-")
-  ) {
-    // Non-simple hour field: leave as-is (best effort).
-    return cron.trim();
+  const offsetHours = Math.round(tzOffsetMinutes(new Date(), timeZone) / 60);
+  const shift = (h: number) => (((h + offsetHours) % 24) + 24) % 24;
+
+  // Wildcard "every hour": every local hour is also every UTC hour — no shift.
+  if (hour === "*") return cron.trim();
+
+  // Comma list of explicit hours ("9,17"): shift each. This is the common
+  // multi-hour case, so convert it correctly rather than punting.
+  if (hour.includes(",")) {
+    const hours = hour.split(",");
+    if (hours.every((p) => Number.isInteger(Number(p)))) {
+      const shifted = hours.map((p) => shift(Number(p))).join(",");
+      return `${min} ${shifted} ${dom} ${mon} ${dow}`;
+    }
+    return null; // mixed forms in the list — can't safely convert
   }
+
+  // Step ("*/2") and range ("9-17") hour fields cross the offset boundary in
+  // ways a simple add can't express; refuse rather than fire at the wrong time.
+  if (hour.includes("/") || hour.includes("-")) return null;
+
   const h = Number(hour);
   if (!Number.isInteger(h)) return null;
-  const offsetHours = tzOffsetMinutes(new Date(), timeZone) / 60;
-  const utcHour = (((h + offsetHours) % 24) + 24) % 24;
-  return `${min} ${Math.round(utcHour)} ${dom} ${mon} ${dow}`;
+  return `${min} ${shift(h)} ${dom} ${mon} ${dow}`;
 }
 
 export function toReminderView(

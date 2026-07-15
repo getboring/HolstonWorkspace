@@ -95,6 +95,11 @@ export async function handleFetch(
   }
 
   if (request.method === "POST" && url.pathname === "/setup/telegram-webhook") {
+    // Browser-driven state change: block cross-origin (CSRF) before auth, same
+    // as the skill approve/reject route. (Telegram's own webhook has no Origin
+    // and is handled separately above, so this guard doesn't affect it.)
+    const csrf = assertSameOrigin(request);
+    if (csrf) return csrf;
     const auth = await authorize(request, env);
     if (auth instanceof Response) return auth;
     return setupTelegramWebhook(request, env);

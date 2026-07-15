@@ -8,14 +8,19 @@ import { Text } from "@cloudflare/kumo/components/text";
 import {
   ArrowsClockwiseIcon,
   ArrowSquareOutIcon,
+  ArrowUUpLeftIcon,
   BroadcastIcon,
+  CheckIcon,
   CodeIcon,
+  DownloadSimpleIcon,
   FloppyDiskIcon,
   MonitorPlayIcon,
   TrashIcon,
+  XIcon,
 } from "@phosphor-icons/react";
 import { useCallback, useEffect, useState } from "react";
 import type { HolstonAgentConnection } from "../app";
+import { downloadText } from "../lib/download";
 import type {
   BrowserLiveViewResult,
   ExecutionView,
@@ -83,17 +88,51 @@ function BrowserSection({
 }) {
   const [view, setView] = useState<BrowserLiveViewResult | null>(null);
   const [loading, setLoading] = useState(false);
+  // Remember the last session id we saw (from a Live View check or a manual
+  // entry) so a finished session's recording can be fetched afterward.
+  const [sessionId, setSessionId] = useState("");
+  const [fetchingRec, setFetchingRec] = useState(false);
+  const [recNote, setRecNote] = useState<string | null>(null);
 
   const check = useCallback(async () => {
     setLoading(true);
     try {
-      setView(await agent.stub.browserLiveView());
+      const v = await agent.stub.browserLiveView();
+      setView(v);
+      if (v.sessionId) setSessionId(v.sessionId);
     } catch {
       setView({ active: false, targets: [], error: "Could not reach Live View" });
     } finally {
       setLoading(false);
     }
   }, [agent]);
+
+  const fetchRecording = async () => {
+    const id = sessionId.trim();
+    if (!id) return;
+    setFetchingRec(true);
+    setRecNote(null);
+    try {
+      const rec = await agent.stub.browserRecording(id);
+      if (!rec.ok) {
+        setRecNote(rec.error ?? "Recording not found");
+        return;
+      }
+      const tabs = rec.events ? Object.keys(rec.events).length : 0;
+      const secs = rec.durationMs ? Math.round(rec.durationMs / 1000) : 0;
+      // rrweb JSON — downloadable and replayable in any rrweb-player.
+      downloadText(
+        `holston-recording-${id}.json`,
+        JSON.stringify(rec.events ?? {}),
+        "application/json",
+      );
+      setRecNote(`Downloaded recording — ${tabs} tab(s), ~${secs}s. Replay it in an rrweb-player.`);
+    } catch (err) {
+      setRecNote(err instanceof Error ? err.message : "Fetch failed");
+    } finally {
+      setFetchingRec(false);
+    }
+  };
 
   return (
     <Surface className="p-4 rounded-xl">
@@ -110,7 +149,7 @@ function BrowserSection({
         When Holston is driving a browser, open a live, interactive view of each
         tab to watch or take over. Recording is{" "}
         {state.settings.browserRecording ? "on" : "off"} (toggle in Settings) —
-        with it on, finished sessions can be replayed.
+        with it on, download a finished session's rrweb recording below.
       </Text>
 
       {view === null ? (
@@ -144,6 +183,33 @@ function BrowserSection({
           )}
         </div>
       )}
+
+      {/* Recording download — reachable when a session id is known. Playback
+          needs CF_ACCOUNT_ID + CF_API_TOKEN (the callable reports if unset). */}
+      <div className="mt-4 border-t border-kumo-hairline pt-3">
+        <Text size="sm">Session recording</Text>
+        <div className="mt-2 flex items-end gap-2">
+          <div className="flex-1">
+            <Input
+              label="Browser session id"
+              value={sessionId}
+              onChange={(e) => setSessionId(e.target.value)}
+              placeholder="from a Live View check, or paste one"
+            />
+          </div>
+          <Button
+            size="sm"
+            variant="secondary"
+            icon={DownloadSimpleIcon}
+            loading={fetchingRec}
+            disabled={!sessionId.trim()}
+            onClick={fetchRecording}
+          >
+            Download
+          </Button>
+        </div>
+        {recNote && <div className="mt-2"><Text variant="secondary" size="sm">{recNote}</Text></div>}
+      </div>
     </Surface>
   );
 }
@@ -185,6 +251,27 @@ function ExecutionsSection({ agent }: { agent: HolstonAgentConnection }) {
     }
   };
 
+  // Resolve a paused execution. approve/reject are Think built-ins (they resume
+  // the run and auto-continue the chat); rollback is our own callable.
+  const [actingId, setActingId] = useState<string | null>(null);
+  const act = async (id: string, action: "approve" | "reject" | "rollback") => {
+    setActingId(id);
+    setNotice(null);
+    try {
+      if (action === "approve") await agent.stub.approveExecution(id);
+      else if (action === "reject") await agent.stub.rejectExecution(id);
+      else {
+        const res = await agent.stub.rollbackExecution(id);
+        if (!res.ok) setNotice(res.error ?? "Rollback failed");
+      }
+      await load();
+    } catch (err) {
+      setNotice(err instanceof Error ? err.message : `${action} failed`);
+    } finally {
+      setActingId(null);
+    }
+  };
+
   return (
     <Surface className="p-4 rounded-xl">
       <div className="flex items-center justify-between">
@@ -218,6 +305,25 @@ function ExecutionsSection({ agent }: { agent: HolstonAgentConnection }) {
               </div>
               <pre className="mt-1 overflow-x-auto text-xs text-kumo-subtle holston-scroll">{e.code.slice(0, 400)}</pre>
               {e.error && <Text variant="error" size="xs">{e.error}</Text>}
+
+              {/* Paused: the run stopped for approval — resolve it here so it
+                  isn't a dead end. */}
+              {e.status === "paused" && (
+                <div className="mt-2 rounded-md border border-kumo-hairline bg-kumo-base p-2">
+                  <Text variant="secondary" size="xs">
+                    This run is paused waiting for your approval to continue.
+                  </Text>
+                  <div className="mt-2 flex gap-2">
+                    <Button size="sm" variant="primary" icon={CheckIcon} loading={actingId === e.id} onClick={() => act(e.id, "approve")}>
+                      Approve &amp; resume
+                    </Button>
+                    <Button size="sm" variant="secondary-destructive" icon={XIcon} loading={actingId === e.id} onClick={() => act(e.id, "reject")}>
+                      Reject
+                    </Button>
+                  </div>
+                </div>
+              )}
+
               {savingId === e.id ? (
                 <div className="mt-2 flex items-center gap-2">
                   <div className="flex-1">
@@ -228,9 +334,12 @@ function ExecutionsSection({ agent }: { agent: HolstonAgentConnection }) {
                 </div>
               ) : (
                 (e.status === "completed" || e.status === "applied") && (
-                  <div className="mt-2">
+                  <div className="mt-2 flex gap-2">
                     <Button size="sm" variant="secondary" icon={FloppyDiskIcon} onClick={() => { setSavingId(e.id); setNotice(null); }}>
                       Save as snippet
+                    </Button>
+                    <Button size="sm" variant="ghost" icon={ArrowUUpLeftIcon} loading={actingId === e.id} onClick={() => act(e.id, "rollback")}>
+                      Roll back
                     </Button>
                   </div>
                 )

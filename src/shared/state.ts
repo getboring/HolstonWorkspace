@@ -157,6 +157,15 @@ export interface ExecutionView {
   createdAt: number;
 }
 
+/** An action a paused execution is waiting for approval on. */
+export interface PendingActionView {
+  executionId: string;
+  seq: number;
+  connector: string;
+  method: string;
+  args: unknown;
+}
+
 /** One tab of an active browser Live View. */
 export interface BrowserLiveViewTargetView {
   url: string;

@@ -70,6 +70,7 @@ import {
   type BrowserRecordingResult,
   type ExecutionView,
   type HolstonSettings,
+  type PendingActionView,
   type HolstonState,
   type McpServerView,
   type PushSubscriptionRecord,
@@ -1059,7 +1060,7 @@ export class HolstonAgent extends Think<Env, HolstonState> {
         idempotencyKey: `snippet:${clean}`,
         input: { name: clean, executionId, description },
         output: { name: snippet.name, savedAt: snippet.savedAt },
-        actor: "owner",
+        actor: this.name,
       });
       this.syncReceiptCount();
       return { ok: true };
@@ -1082,6 +1083,45 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     if (!this.codemode) return [];
     const rows = await this.codemode.executions(Math.min(Math.max(limit, 1), 100));
     return rows.map(toExecutionView);
+  }
+
+  /**
+   * Actions a paused execution is waiting on. Think exposes `approveExecution`
+   * and `rejectExecution` natively (both client-callable, and they replace the
+   * paused transcript part + auto-continue the chat — so the UI calls those
+   * directly). This just surfaces WHAT is pending so the operator can decide.
+   */
+  @callable()
+  async listPendingActions(executionId: string): Promise<PendingActionView[]> {
+    if (!this.codemode) return [];
+    const pending = await this.codemode.pending(String(executionId));
+    return pending.map((p) => ({
+      executionId: p.executionId,
+      seq: p.seq,
+      connector: p.connector,
+      method: p.method,
+      args: p.args,
+    }));
+  }
+
+  /** Roll back a completed execution's applied actions (not a Think built-in). */
+  @callable()
+  async rollbackExecution(executionId: string): Promise<{ ok: boolean; error?: string }> {
+    if (!this.codemode) return { ok: false, error: "Code execution is not enabled." };
+    try {
+      await this.codemode.rollback({ executionId: String(executionId) });
+      this.receiptStore().write({
+        action: "rollback_execution",
+        idempotencyKey: `exec:rollback:${executionId}`,
+        input: { executionId },
+        output: { rolledBack: true },
+        actor: this.name,
+      });
+      this.syncReceiptCount();
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : "Rollback failed" };
+    }
   }
 
   // ── Browser Live View + recording (finding #3) ─────────────────────────

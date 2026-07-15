@@ -135,7 +135,7 @@ export function SettingsPanel({
           <div className="flex items-start justify-between gap-4">
             <div>
               <Text>Record browser sessions</Text>
-              <Text variant="secondary" size="sm">Capture browser automation as replayable rrweb recordings. View live sessions and replays in the Lab tab. Playback needs Cloudflare API credentials.</Text>
+              <Text variant="secondary" size="sm">Capture browser automation as rrweb recordings. Watch live sessions and download finished recordings in the Lab tab. Download needs Cloudflare API credentials.</Text>
             </div>
             <Switch checked={s.browserRecording} onCheckedChange={(v) => patch({ browserRecording: v })} aria-label="Record browser sessions" />
           </div>

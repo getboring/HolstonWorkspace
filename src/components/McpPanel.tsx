@@ -11,7 +11,7 @@ import {
   PlusIcon,
   TrashIcon,
 } from "@phosphor-icons/react";
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { HolstonAgentConnection } from "../app";
 import type { HolstonState, McpServerView } from "../shared/state";
 
@@ -51,6 +51,17 @@ export function McpPanel({
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [tools, setTools] = useState<Record<string, string[]>>({});
+
+  const loadTools = useCallback(async () => {
+    try {
+      setTools(await agent.stub.listMcpTools());
+    } catch {
+      setTools({});
+    }
+  }, [agent]);
+
+  useEffect(() => { loadTools(); }, [loadTools, state.mcpServers]);
 
   const connect = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -123,7 +134,12 @@ export function McpPanel({
         ) : (
           <div className="flex flex-col gap-2">
             {state.mcpServers.map((server) => (
-              <ServerRow key={server.id} server={server} onDisconnect={() => disconnect(server.id)} />
+              <ServerRow
+                key={server.id}
+                server={server}
+                tools={tools[server.id] ?? []}
+                onDisconnect={() => disconnect(server.id)}
+              />
             ))}
           </div>
         )}
@@ -132,29 +148,46 @@ export function McpPanel({
   );
 }
 
-function ServerRow({ server, onDisconnect }: { server: McpServerView; onDisconnect: () => void }) {
+function ServerRow({
+  server,
+  tools,
+  onDisconnect,
+}: {
+  server: McpServerView;
+  tools: string[];
+  onDisconnect: () => void;
+}) {
   return (
-    <Surface className="flex items-center gap-3 p-3 rounded-lg border border-kumo-hairline">
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2">
-          <Text truncate>{server.name}</Text>
-          <Badge variant={STATE_VARIANT[server.state]}>{server.state}</Badge>
-          {server.state === "ready" && <Text variant="secondary" size="sm">{server.toolCount} tools</Text>}
+    <Surface className="p-3 rounded-lg border border-kumo-hairline">
+      <div className="flex items-center gap-3">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <Text truncate>{server.name}</Text>
+            <Badge variant={STATE_VARIANT[server.state]}>{server.state}</Badge>
+            {server.state === "ready" && <Text variant="secondary" size="sm">{server.toolCount} tools</Text>}
+          </div>
+          <div className="truncate"><Text variant="mono-secondary">{server.url}</Text></div>
+          {server.error && <Text variant="error" size="sm">{server.error}</Text>}
         </div>
-        <div className="truncate"><Text variant="mono-secondary">{server.url}</Text></div>
-        {server.error && <Text variant="error" size="sm">{server.error}</Text>}
+        {server.state === "authenticating" && server.authUrl && (
+          <Button
+            size="sm"
+            variant="secondary"
+            icon={ArrowSquareOutIcon}
+            onClick={() => server.authUrl && openAuthUrl(server.authUrl)}
+          >
+            Authorize
+          </Button>
+        )}
+        <Button size="sm" variant="ghost" icon={TrashIcon} onClick={onDisconnect} aria-label="Disconnect server" />
       </div>
-      {server.state === "authenticating" && server.authUrl && (
-        <Button
-          size="sm"
-          variant="secondary"
-          icon={ArrowSquareOutIcon}
-          onClick={() => server.authUrl && openAuthUrl(server.authUrl)}
-        >
-          Authorize
-        </Button>
+      {tools.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1">
+          {tools.map((t) => (
+            <Badge key={t} variant="outline">{t}</Badge>
+          ))}
+        </div>
       )}
-      <Button size="sm" variant="ghost" icon={TrashIcon} onClick={onDisconnect} aria-label="Disconnect server" />
     </Surface>
   );
 }

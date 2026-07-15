@@ -32,6 +32,8 @@ export interface HolstonSettings {
   timezone: string;
   /** Extra instruction appended to the system prompt (user-editable persona). */
   customInstructions: string;
+  /** Record browser automation sessions (rrweb) for later replay. */
+  browserRecording: boolean;
 }
 
 export const DEFAULT_TIMEZONE = "America/New_York";
@@ -43,6 +45,7 @@ export const DEFAULT_SETTINGS: HolstonSettings = {
   toolApprovals: {},
   timezone: DEFAULT_TIMEZONE,
   customInstructions: "",
+  browserRecording: false,
 };
 
 /** Common IANA timezones offered in the Settings UI. */
@@ -124,6 +127,51 @@ export interface UsageView {
   limit: number;
   remaining: number;
   exceeded: boolean;
+}
+
+/** A saved, reusable Codemode snippet (fetched on demand). */
+export interface SnippetView {
+  name: string;
+  description: string;
+  code: string;
+  savedAt: number;
+  connectors: string[];
+}
+
+/** A Codemode execution audit row (fetched on demand). */
+export interface ExecutionView {
+  id: string;
+  code: string;
+  status: string;
+  result: unknown;
+  error?: string;
+  steps: number;
+  createdAt: number;
+}
+
+/** One tab of an active browser Live View. */
+export interface BrowserLiveViewTargetView {
+  url: string;
+  pageUrl?: string;
+  title?: string;
+}
+
+/** Live View state for the agent's shared browser session. */
+export interface BrowserLiveViewResult {
+  active: boolean;
+  sessionId?: string;
+  expiresInMs?: number;
+  targets: BrowserLiveViewTargetView[];
+  error?: string;
+}
+
+/** An rrweb recording of a finished browser session, ready for replay. */
+export interface BrowserRecordingResult {
+  ok: boolean;
+  sessionId?: string;
+  durationMs?: number;
+  events?: Record<string, unknown[]>;
+  error?: string;
 }
 
 export interface HolstonState {

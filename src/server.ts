@@ -47,7 +47,7 @@ import { EventLog, type EventPage, type EventSeverity } from "./events";
 import { handleEmail, handleFetch } from "./lib/worker";
 import { subscribeObservability } from "./observability";
 import { sendPush } from "./push";
-import { ReceiptStore, type Receipt } from "./receipts";
+import { ReceiptStore, type Receipt, type ReceiptPage } from "./receipts";
 import { UsageMeter, type UsageSnapshot } from "./usage";
 import {
   DEFAULT_MODEL,
@@ -909,6 +909,18 @@ export class HolstonAgent extends Think<Env, HolstonState> {
   @callable()
   listReceipts(limit = 100): Receipt[] {
     return this.receiptStore().list(limit);
+  }
+
+  /** One newest-first page of receipts with a keyset cursor. */
+  @callable()
+  listReceiptsPage(opts?: { limit?: number; cursor?: string | null }): ReceiptPage {
+    return this.receiptStore().page(opts);
+  }
+
+  /** Every receipt as NDJSON, for download/export. */
+  @callable()
+  exportReceipts(): string {
+    return this.receiptStore().export();
   }
 
   /** One page of System Health events, newest-first, with a next cursor. */

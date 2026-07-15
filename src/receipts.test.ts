@@ -48,9 +48,31 @@ function fakeSql(): AgentSql {
     }
 
     if (q.startsWith("SELECT")) {
-      const sorted = [...rows].sort((a, b) =>
-        String(b.created_at).localeCompare(String(a.created_at)),
-      );
+      // (created_at DESC, id DESC) is the composite order used by both list()
+      // and page(); id breaks created_at ties deterministically.
+      const sorted = [...rows].sort((a, b) => {
+        const c = String(b.created_at).localeCompare(String(a.created_at));
+        return c !== 0 ? c : String(b.id).localeCompare(String(a.id));
+      });
+
+      // page(): keyset predicate `(created_at < ?) OR (created_at = ? AND id < ?)`
+      if (q.includes("CREATED_AT <")) {
+        const curCreated = values[0] as string;
+        const curId = values[2] as string;
+        const limit = values[3] as number;
+        const filtered = sorted.filter(
+          (r) =>
+            String(r.created_at) < curCreated ||
+            (String(r.created_at) === curCreated && String(r.id) < curId),
+        );
+        return filtered.slice(0, limit) as never;
+      }
+
+      // list()/export(): a trailing LIMIT if present, else everything.
+      if (q.includes("LIMIT")) {
+        const limit = values[values.length - 1] as number;
+        return sorted.slice(0, limit) as never;
+      }
       return sorted as never;
     }
     return [] as never;
@@ -95,5 +117,39 @@ describe("ReceiptStore", () => {
     expect(store.hasKey("r:1")).toBe(false);
     store.write({ action: "run_reminder", idempotencyKey: "r:1", input: null, output: null, actor: "u" });
     expect(store.hasKey("r:1")).toBe(true);
+  });
+
+  it("paginates via keyset cursor without repeats or gaps", () => {
+    // Distinct createdAt via explicit ids AND a monotonic action label; the
+    // fake orders by (created_at DESC, id DESC), so give ascending ids.
+    for (let i = 0; i < 5; i++) {
+      store.write({
+        id: `id-${i}`,
+        action: `a${i}`,
+        idempotencyKey: null,
+        input: null,
+        output: null,
+        actor: "u",
+      });
+    }
+    const all = store.list();
+    const p1 = store.page({ limit: 2 });
+    expect(p1.receipts).toHaveLength(2);
+    expect(p1.nextCursor).not.toBeNull();
+    const p2 = store.page({ limit: 2, cursor: p1.nextCursor });
+    const p3 = store.page({ limit: 2, cursor: p2.nextCursor });
+    const paged = [...p1.receipts, ...p2.receipts, ...p3.receipts].map((r) => r.id);
+    // Same set, same order as list(), no dupes.
+    expect(paged).toEqual(all.map((r) => r.id));
+    expect(new Set(paged).size).toBe(5);
+    expect(p3.nextCursor).toBeNull();
+  });
+
+  it("exports all receipts as NDJSON", () => {
+    store.write({ id: "e1", action: "x", idempotencyKey: null, input: { a: 1 }, output: null, actor: "u" });
+    store.write({ id: "e2", action: "y", idempotencyKey: null, input: null, output: null, actor: "u" });
+    const lines = store.export().split("\n");
+    expect(lines).toHaveLength(2);
+    expect(JSON.parse(lines[0] ?? "{}").action).toBeTruthy();
   });
 });

@@ -4,22 +4,32 @@ import { Empty } from "@cloudflare/kumo/components/empty";
 import { Loader } from "@cloudflare/kumo/components/loader";
 import { Surface } from "@cloudflare/kumo/components/surface";
 import { Text } from "@cloudflare/kumo/components/text";
-import { ArrowsClockwiseIcon, ReceiptIcon } from "@phosphor-icons/react";
+import {
+  ArrowsClockwiseIcon,
+  DownloadSimpleIcon,
+  ReceiptIcon,
+} from "@phosphor-icons/react";
 import { useCallback, useEffect, useState } from "react";
 import type { HolstonAgentConnection } from "../app";
+import { downloadText } from "../lib/download";
 import type { ReceiptView } from "../shared/state";
 
 export function ReceiptsPanel({ agent }: { agent: HolstonAgentConnection }) {
   const [receipts, setReceipts] = useState<ReceiptView[]>([]);
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
-      const rows = await agent.stub.listReceipts(100);
-      setReceipts(rows as ReceiptView[]);
-      setError(null);
+      const page = await agent.stub.listReceiptsPage({ limit: 50 });
+      setReceipts(page.receipts as ReceiptView[]);
+      setCursor(page.nextCursor);
+      setHasMore(page.nextCursor !== null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load receipts");
     } finally {
@@ -28,6 +38,30 @@ export function ReceiptsPanel({ agent }: { agent: HolstonAgentConnection }) {
   }, [agent]);
 
   useEffect(() => { load(); }, [load]);
+
+  const loadMore = async () => {
+    if (!cursor) return;
+    setLoadingMore(true);
+    try {
+      const page = await agent.stub.listReceiptsPage({ limit: 50, cursor });
+      setReceipts((prev) => [...prev, ...(page.receipts as ReceiptView[])]);
+      setCursor(page.nextCursor);
+      setHasMore(page.nextCursor !== null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load more");
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
+  const exportAll = async () => {
+    try {
+      const ndjson = await agent.stub.exportReceipts();
+      downloadText(`holston-receipts-${Date.now()}.ndjson`, ndjson);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Export failed");
+    }
+  };
 
   return (
     <div className="h-full overflow-y-auto holston-scroll">
@@ -40,7 +74,10 @@ export function ReceiptsPanel({ agent }: { agent: HolstonAgentConnection }) {
               idempotency → authorize → execute → receipt). Newest first.
             </Text>
           </div>
-          <Button size="sm" variant="ghost" icon={ArrowsClockwiseIcon} onClick={load}>Refresh</Button>
+          <div className="flex gap-1">
+            <Button size="sm" variant="ghost" icon={DownloadSimpleIcon} onClick={exportAll} aria-label="Export receipts" />
+            <Button size="sm" variant="ghost" icon={ArrowsClockwiseIcon} onClick={load} aria-label="Refresh" />
+          </div>
         </div>
 
         {loading && <div className="flex items-center gap-2"><Loader size={16} /><Text variant="secondary" size="sm">Loading…</Text></div>}
@@ -65,6 +102,13 @@ export function ReceiptsPanel({ agent }: { agent: HolstonAgentConnection }) {
                 </pre>
               </Surface>
             ))}
+            {hasMore && (
+              <div className="flex justify-center mt-2">
+                <Button size="sm" variant="secondary" loading={loadingMore} onClick={loadMore}>
+                  Load more
+                </Button>
+              </div>
+            )}
           </div>
         )}
       </div>

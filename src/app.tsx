@@ -143,7 +143,7 @@ function Workspace({ agentName, dark, setDark }: { agentName: string; dark: bool
     <div className="holston-app bg-kumo-canvas text-kumo-default" data-mode={dark ? "dark" : "light"}>
       {sidebarOpen && (
         <aside className="w-64 shrink-0 border-r border-kumo-hairline bg-kumo-base overflow-hidden hidden md:block">
-          <SessionList messages={messages as UIMessage[]} />
+          <SessionList agent={agent} messages={messages as UIMessage[]} />
         </aside>
       )}
 

@@ -3,7 +3,7 @@
   "description": "Cloudflare-native AI agent on the Agents SDK (Think): code execution, browser automation, self-improving skills, gated actions with receipts, persistent memory, MCP, scheduling, voice.",
   "private": true,
   "type": "module",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "scripts": {
     "start": "vite dev",
     "build": "vite build",

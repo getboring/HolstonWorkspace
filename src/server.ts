@@ -43,6 +43,7 @@ import {
   toReminderView,
   type ReminderPayload,
 } from "./lib/time";
+import { EventLog, type EventPage, type EventSeverity } from "./events";
 import { handleEmail, handleFetch } from "./lib/worker";
 import { subscribeObservability } from "./observability";
 import { sendPush } from "./push";
@@ -107,13 +108,33 @@ export class HolstonAgent extends Think<Env, HolstonState> {
   #skillStore?: SkillStore;
   #receiptStore?: ReceiptStore;
   #usageMeter?: UsageMeter;
+  #eventLog?: EventLog;
   #obsDisposer?: () => void;
 
   override async onStart() {
     // Surface scheduled-task / chat-recovery / MCP failures that are otherwise
     // silent. Idempotent per isolate — dispose any prior subscription first.
+    // The sink persists each event to the System Health log and pushes a
+    // notification for the critical ones.
     this.#obsDisposer?.();
-    this.#obsDisposer = subscribeObservability();
+    this.#obsDisposer = subscribeObservability((event) => {
+      this.eventLog().record({
+        severity: event.severity,
+        source: event.source,
+        kind: event.kind,
+        message: event.message,
+        detail: event.detail,
+      });
+      this.syncHealth();
+      if (event.notify) {
+        // Fire-and-forget: notification failure must not break the channel.
+        void this.notifyUser("Holston needs attention", event.message, {
+          url: "/",
+        }).catch((err) =>
+          console.error("[holston] health notify failed:", err),
+        );
+      }
+    });
 
     // Schema evolution: backfill any settings fields added after this DO's
     // state was first persisted (e.g. `timezone`), so older instances get new
@@ -124,12 +145,20 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     }
     this.syncReceiptCount();
     this.syncUsage();
+    this.syncHealth();
 
     if (this.env.MCP_SERVER_URL) {
       try {
         await this.addMcpServer("holston-mcp", this.env.MCP_SERVER_URL);
       } catch (err) {
         console.error("[holston] MCP server registration failed:", err);
+        this.logEvent(
+          "error",
+          "mcp",
+          "mcp:registration_failed",
+          "Failed to register the configured MCP server on startup.",
+          { url: this.env.MCP_SERVER_URL, error: String(err) },
+        );
       }
     }
     // Correct any recurring-reminder DST drift, then reconcile the synced view
@@ -698,6 +727,13 @@ export class HolstonAgent extends Think<Env, HolstonState> {
           });
         } catch (err) {
           console.error("[holston] email reply failed:", err);
+          this.logEvent(
+            "error",
+            "email",
+            "email:reply_failed",
+            "Failed to send an email reply.",
+            { subject, error: String(err) },
+          );
         }
       }
     }
@@ -749,6 +785,13 @@ export class HolstonAgent extends Think<Env, HolstonState> {
         });
       } catch (err) {
         console.error("[holston] notify email failed:", err);
+        this.logEvent(
+          "warning",
+          "notify",
+          "notify:email_failed",
+          "Failed to deliver a notification email.",
+          { title, error: String(err) },
+        );
       }
     }
   }
@@ -816,6 +859,11 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     return this.#usageMeter;
   }
 
+  private eventLog(): EventLog {
+    this.#eventLog ??= new EventLog(this);
+    return this.#eventLog;
+  }
+
   private syncReceiptCount() {
     // Touch the store first so the table exists (its constructor creates it).
     const count = this.receiptStore().count();
@@ -826,6 +874,26 @@ export class HolstonAgent extends Think<Env, HolstonState> {
 
   private syncUsage() {
     this.setState({ ...this.state, usage: this.usageMeter().snapshot() });
+  }
+
+  /** Push the error/critical count into synced state so the UI can badge it. */
+  private syncHealth() {
+    const unhealthy = this.eventLog().count(["error", "critical"]);
+    if (unhealthy !== this.state.healthAlerts) {
+      this.setState({ ...this.state, healthAlerts: unhealthy });
+    }
+  }
+
+  /** Record an operational event to System Health and refresh the badge. */
+  private logEvent(
+    severity: EventSeverity,
+    source: string,
+    kind: string,
+    message: string,
+    detail?: unknown,
+  ) {
+    this.eventLog().record({ severity, source, kind, message, detail });
+    this.syncHealth();
   }
 
   /** Append a durable fact to the writable `memory` context block. */
@@ -841,6 +909,25 @@ export class HolstonAgent extends Think<Env, HolstonState> {
   @callable()
   listReceipts(limit = 100): Receipt[] {
     return this.receiptStore().list(limit);
+  }
+
+  /** One page of System Health events, newest-first, with a next cursor. */
+  @callable()
+  listEvents(opts?: {
+    limit?: number;
+    cursor?: string | null;
+    severities?: EventSeverity[];
+  }): EventPage {
+    return this.eventLog().page(opts);
+  }
+
+  /** Every retained health event as NDJSON, for download/export. */
+  @callable()
+  exportEvents(): string {
+    return this.eventLog()
+      .all()
+      .map((e) => JSON.stringify(e))
+      .join("\n");
   }
 
   @callable()

@@ -135,6 +135,8 @@ export interface HolstonState {
   receiptCount: number;
   /** Today's AI usage vs. the daily ceiling. */
   usage: UsageView | null;
+  /** Count of error+critical health events, so the UI can badge System Health. */
+  healthAlerts: number;
   /** Bumped whenever the agent wants clients to refetch derived data. */
   revision: number;
 }
@@ -146,6 +148,7 @@ export const INITIAL_STATE: HolstonState = {
   pushSubscriptions: [],
   receiptCount: 0,
   usage: null,
+  healthAlerts: 0,
   revision: 0,
 };
 

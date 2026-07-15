@@ -8,8 +8,8 @@
 ## What It Does
 
 - **Agent loop** via Think + Workers AI (model chosen live from Settings, zero API keys)
-- **Code execution** (Cloudflare Codemode — the model runs generated code in an isolated Worker via a `LOADER` binding, with the workspace, tools, and browser available)
-- **Browser automation** (Cloudflare Browser Rendering — navigate, screenshot, extract, scrape, via a `BROWSER` binding)
+- **Code execution** (Cloudflare Codemode — the model runs generated code in an isolated Worker via a `LOADER` binding, with the workspace, tools, and browser available; every run is on a durable audit trail, and a working run can be promoted to a **reusable named snippet** the model re-runs by name — executable skills)
+- **Browser automation** (Cloudflare Browser Rendering — navigate, screenshot, extract, scrape, via a `BROWSER` binding; an active session can be watched through a live **Live View** URL, and sessions can be recorded as replayable rrweb captures — all surfaced in the Lab tab)
 - **Workspace tools** (bash, read, write, edit, grep, find, list, delete — Think's built-in virtual filesystem over the DO's SQLite)
 - **Read-only web fetch** (allowlisted `fetch_url`: CF docs, Wikipedia, raw.githubusercontent, api.github)
 - **Self-improving skills** (LLM curator proposes skills after complex turns → staged for your approval → vector retrieval)
@@ -28,7 +28,7 @@
 - **Resilience** (circuit breaker on external calls, context-overflow compact-and-retry, stall watchdog, rate-limit classification, diagnostics subscriptions persisted to the health log)
 - **Cloudflare Access** (JWT auth at edge, per-user agent isolation, state read-only from clients, CSRF guard on browser mutations)
 - **Onboarding** (a fresh chat shows clickable starter prompts that each exercise a real capability, so a first-run user discovers what Holston can do)
-- **Kumo UI** (Cloudflare's design system — accessible, themed, light/dark; Chat, Tasks, MCP, Skills, Receipts, Health, Settings tabs)
+- **Kumo UI** (Cloudflare's design system — accessible, themed, light/dark; Chat, Tasks, MCP, Skills, Lab, Receipts, Health, Settings tabs)
 - **Tool approval** (Kumo dialog for gated operations; `approvalMode` enforced via `beforeToolCall`)
 - **Reasoning traces + error boundary** (collapsible reasoning; graceful error handling)
 
@@ -67,8 +67,9 @@ src/app.tsx            React app shell (Kumo Tabs, Toasty, typed agent stub)
 src/lib/push.ts        Client-side push subscribe (service worker + VAPID)
 src/lib/download.ts    Client NDJSON download helper (receipts + health export)
 src/lib/tools.ts       GATED_TOOLS list for the Settings per-tool override UI
-src/components/        ChatView, TasksPanel, McpPanel, SkillsPanel, SettingsPanel, ReceiptsPanel,
-                       HealthPanel, MemoryCard, ToolApproval, SessionList (all Kumo)
+src/components/        ChatView, TasksPanel, McpPanel, SkillsPanel, LabPanel (snippets/executions/
+                       Live View), SettingsPanel, ReceiptsPanel, HealthPanel, MemoryCard,
+                       ToolApproval, SessionList (all Kumo)
 public/sw.js           Push service worker
 skills/                Bundled SKILL.md files (agents:skills)
 docs/plans/            Capability audit + build plans
@@ -86,6 +87,9 @@ The UI drives the agent through typed RPC (`agent.stub.*`), not env vars or loca
 | `getVapidPublicKey()` / `subscribePush(sub)` / `unsubscribePush(endpoint)` | Web Push subscription |
 | `listReceipts(limit)` / `listReceiptsPage({limit,cursor})` / `exportReceipts()` | Immutable action-receipt ledger — capped list, keyset page, NDJSON export (Receipts tab) |
 | `listEvents({limit,cursor,severities})` / `exportEvents()` | System Health event log — paginated, severity-filtered, NDJSON export (Health tab) |
+| `listSnippets()` / `saveSnippet(name,execId,desc)` / `deleteSnippet(name)` | Codemode snippets — promote a working execution to a reusable named snippet (Lab tab); saves are receipted |
+| `listExecutions(limit)` | Codemode execution audit trail — what code ran and how it ended (Lab tab) |
+| `browserLiveView()` / `browserRecording(sessionId)` | Live View URLs for an active browser session; rrweb replay of a finished one (Lab tab) |
 | `getUsage()` | Today's AI-call budget snapshot (Settings meter) |
 | `searchHistory(query,limit)` | Full-text search over conversation history (sidebar) |
 | `getMemory()` / `setMemory(content)` | Read / replace the durable `memory` context block (editable Memory card) |
@@ -180,6 +184,19 @@ Both are wired via bindings in `wrangler.jsonc` (no secrets needed):
 
 Both tools respect `approvalMode`; the system prompt only advertises a capability
 when its binding is present.
+
+**Codemode snippets** — the `execute` tool is wired via `createExecuteRuntime`, so
+its durable runtime (execution audit trail + reusable snippets) is reachable from
+callables. A successful run can be promoted to a named snippet in the Lab tab;
+saves are receipted. **Live View + recording** — set the browser session to
+recording in Settings to capture rrweb replays. Live View works from the binding
+alone; *replaying* a recording hits the Cloudflare REST API, so it needs two
+owner secrets:
+
+```bash
+npx wrangler secret put CF_ACCOUNT_ID   # 94bdc287cd4e0622b68f9e18e406ae66
+npx wrangler secret put CF_API_TOKEN    # a token with Browser Rendering read access
+```
 
 ### CI/CD
 

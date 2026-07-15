@@ -11,6 +11,7 @@ import {
   LightningIcon,
   MoonIcon,
   PlugsConnectedIcon,
+  FlaskIcon,
   HeartbeatIcon,
   ReceiptIcon,
   SidebarIcon,
@@ -23,6 +24,7 @@ import { useAgent } from "agents/react";
 import { useEffect, useState } from "react";
 import { ChatView } from "./components/ChatView";
 import { HealthPanel } from "./components/HealthPanel";
+import { LabPanel } from "./components/LabPanel";
 import { McpPanel } from "./components/McpPanel";
 import { PoweredBy } from "./components/PoweredBy";
 import { ReceiptsPanel } from "./components/ReceiptsPanel";
@@ -34,7 +36,7 @@ import { ToolApproval } from "./components/ToolApproval";
 import type { HolstonAgent } from "./server";
 import { INITIAL_STATE, type HolstonState } from "./shared/state";
 
-type Tab = "chat" | "tasks" | "mcp" | "skills" | "receipts" | "health" | "settings";
+type Tab = "chat" | "tasks" | "mcp" | "skills" | "lab" | "receipts" | "health" | "settings";
 
 export function App() {
   const [dark, setDark] = useState(() => {
@@ -134,6 +136,7 @@ function Workspace({ agentName, dark, setDark }: { agentName: string; dark: bool
     { value: "tasks", label: "Tasks", icon: LightningIcon, badge: state.reminders.length },
     { value: "mcp", label: "MCP", icon: PlugsConnectedIcon, badge: state.mcpServers.length },
     { value: "skills", label: "Skills", icon: SparkleIcon },
+    { value: "lab", label: "Lab", icon: FlaskIcon },
     { value: "receipts", label: "Receipts", icon: ReceiptIcon, badge: state.receiptCount },
     { value: "health", label: "Health", icon: HeartbeatIcon, badge: state.healthAlerts },
     { value: "settings", label: "Settings", icon: GearIcon },
@@ -188,6 +191,7 @@ function Workspace({ agentName, dark, setDark }: { agentName: string; dark: bool
           {activeTab === "tasks" && <TasksPanel agent={agent} state={state} />}
           {activeTab === "mcp" && <McpPanel agent={agent} state={state} />}
           {activeTab === "skills" && <SkillsPanel />}
+          {activeTab === "lab" && <LabPanel agent={agent} state={state} />}
           {activeTab === "receipts" && <ReceiptsPanel agent={agent} />}
           {activeTab === "health" && <HealthPanel agent={agent} />}
           {activeTab === "settings" && <SettingsPanel agent={agent} state={state} />}

@@ -19,8 +19,14 @@ import {
 } from "@cloudflare/think/messengers";
 import telegramMessenger from "@cloudflare/think/messengers/telegram";
 import { createBrowserTools } from "@cloudflare/think/tools/browser";
-import { createExecuteTool } from "@cloudflare/think/tools/execute";
-import { CodemodeRuntime } from "@cloudflare/codemode";
+import { createExecuteRuntime } from "@cloudflare/think/tools/execute";
+import {
+  CodemodeRuntime,
+  type CodemodeRuntimeHandle,
+  type ExecutionState,
+  type Snippet,
+} from "@cloudflare/codemode";
+import { BrowserConnector, getBrowserRecording } from "agents/browser";
 import { callable, type Schedule } from "agents";
 import { isAutoReplyEmail, type AgentEmail } from "agents/email";
 import bundledSkills from "agents:skills";
@@ -44,7 +50,7 @@ import {
   type ReminderPayload,
 } from "./lib/time";
 import { EventLog, type EventPage, type EventSeverity } from "./events";
-import { handleEmail, handleFetch } from "./lib/worker";
+import { handleEmail, handleFetch, SKILL_NAME_PATTERN } from "./lib/worker";
 import { subscribeObservability } from "./observability";
 import { sendPush } from "./push";
 import { ReceiptStore, type Receipt, type ReceiptPage } from "./receipts";
@@ -57,11 +63,15 @@ import {
   isApprovalMode,
   isValidModel,
   isValidTimezone,
+  type BrowserLiveViewResult,
+  type BrowserRecordingResult,
+  type ExecutionView,
   type HolstonSettings,
   type HolstonState,
   type McpServerView,
   type PushSubscriptionRecord,
   type ReminderView,
+  type SnippetView,
 } from "./shared/state";
 import { curatorHook, nudgerHook, retrieverHook } from "./skills/hooks";
 import { SkillStore } from "./skills/store";
@@ -110,6 +120,15 @@ export class HolstonAgent extends Think<Env, HolstonState> {
   #usageMeter?: UsageMeter;
   #eventLog?: EventLog;
   #obsDisposer?: () => void;
+
+  /**
+   * Set by `createExecuteRuntime(this)` in getTools so callables can reach the
+   * Codemode runtime (snippets + execution audit trail). Declared on the Think
+   * base class; we re-declare the type only.
+   */
+  declare codemode?: CodemodeRuntimeHandle;
+  /** The browser connector behind the execute tool — source of Live View URLs. */
+  #browserConnector?: BrowserConnector;
 
   override async onStart() {
     // Surface scheduled-task / chat-recovery / MCP failures that are otherwise
@@ -192,10 +211,14 @@ export class HolstonAgent extends Think<Env, HolstonState> {
       "MCP servers",
     ];
     if (this.env.LOADER) {
-      capabilities.push("code execution (run generated code in a sandbox)");
+      capabilities.push(
+        "code execution (run generated code in a sandbox; working runs can be saved as reusable snippets)",
+      );
     }
     if (this.env.BROWSER) {
-      capabilities.push("browser automation (navigate, screenshot, extract)");
+      capabilities.push(
+        "browser automation (navigate, screenshot, extract; sessions can be watched live and recorded)",
+      );
     }
     capabilities.push("agent skills");
 
@@ -228,10 +251,23 @@ export class HolstonAgent extends Think<Env, HolstonState> {
 
     // Cloudflare-native code execution (Codemode): runs model-generated code in
     // an isolated Worker via LOADER, with state.* (the DO workspace), tools.*,
-    // and cdp.* (headless browser) when BROWSER is bound. The one-liner pulls
-    // all of that from `this`.
+    // and cdp.* (headless browser) when BROWSER is bound. We use the *runtime*
+    // form (not the one-liner tool) so callables can reach snippets + the
+    // execution audit trail, and the browser connector for Live View. It also
+    // assigns `this.codemode`. `dynamic` session mode lets the model promote a
+    // browser session that later executions (and Live View) can observe.
     if (this.env.LOADER) {
-      tools.execute = createExecuteTool(this);
+      const { runtime, connectors, tool } = createExecuteRuntime(this, {
+        session: {
+          mode: "dynamic",
+          recording: this.state?.settings?.browserRecording ?? false,
+        },
+      });
+      this.codemode = runtime;
+      this.#browserConnector = connectors.find(
+        (c): c is BrowserConnector => c instanceof BrowserConnector,
+      );
+      tools.execute = tool;
     }
     // Standalone browser-automation tools (navigate/screenshot/extract) for the
     // model to drive Browser Rendering directly.
@@ -488,6 +524,9 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     }
     if (patch.customInstructions !== undefined) {
       next.customInstructions = String(patch.customInstructions).slice(0, 4000);
+    }
+    if (patch.browserRecording !== undefined) {
+      next.browserRecording = !!patch.browserRecording;
     }
 
     this.setState({ ...this.state, settings: next });
@@ -942,6 +981,127 @@ export class HolstonAgent extends Think<Env, HolstonState> {
       .join("\n");
   }
 
+  // ── Codemode snippets + execution audit (finding #2) ───────────────────
+
+  /** Saved, reusable code snippets the model can re-run via codemode.run. */
+  @callable()
+  async listSnippets(): Promise<SnippetView[]> {
+    if (!this.codemode) return [];
+    const snippets = await this.codemode.snippets();
+    return snippets.map(toSnippetView);
+  }
+
+  /**
+   * Promote a past execution's code into a named, reusable snippet — the
+   * bridge from "the model wrote working code once" to "a durable capability".
+   * Receipted, since it's a gated write to the agent's toolset.
+   */
+  @callable()
+  async saveSnippet(
+    name: string,
+    executionId: string,
+    description?: string,
+  ): Promise<{ ok: boolean; error?: string }> {
+    if (!this.codemode) return { ok: false, error: "Code execution is not enabled." };
+    const clean = String(name).trim().slice(0, 64);
+    if (!SKILL_NAME_PATTERN.test(clean)) {
+      return { ok: false, error: "Name must be kebab-case (letters, digits, hyphens)." };
+    }
+    try {
+      const snippet = await this.codemode.saveSnippet(clean, {
+        executionId: String(executionId),
+        description: description ? String(description).slice(0, 200) : undefined,
+      });
+      this.receiptStore().write({
+        action: "save_snippet",
+        idempotencyKey: `snippet:${clean}`,
+        input: { name: clean, executionId, description },
+        output: { name: snippet.name, savedAt: snippet.savedAt },
+        actor: "owner",
+      });
+      this.syncReceiptCount();
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : "Save failed" };
+    }
+  }
+
+  /** Delete a saved snippet by name. */
+  @callable()
+  async deleteSnippet(name: string): Promise<{ ok: boolean }> {
+    if (!this.codemode) return { ok: false };
+    const ok = await this.codemode.deleteSnippet(String(name));
+    return { ok };
+  }
+
+  /** The Codemode execution audit trail (newest first) — what code ran, and how it ended. */
+  @callable()
+  async listExecutions(limit = 25): Promise<ExecutionView[]> {
+    if (!this.codemode) return [];
+    const rows = await this.codemode.executions(Math.min(Math.max(limit, 1), 100));
+    return rows.map(toExecutionView);
+  }
+
+  // ── Browser Live View + recording (finding #3) ─────────────────────────
+
+  /**
+   * Live View URLs for the shared browser session's tabs, if one is active.
+   * Each URL opens a real-time, interactive view of what the agent's browser
+   * is doing — surface them so a human can watch or take over. URLs expire in
+   * ~5 minutes; call again for fresh ones.
+   */
+  @callable()
+  async browserLiveView(): Promise<BrowserLiveViewResult> {
+    if (!this.#browserConnector) return { active: false, targets: [] };
+    try {
+      const view = await this.#browserConnector.liveView();
+      if (!view) return { active: false, targets: [] };
+      return {
+        active: true,
+        sessionId: view.sessionId,
+        expiresInMs: view.expiresInMs,
+        targets: view.targets.map((t) => ({
+          url: t.url,
+          pageUrl: t.pageUrl,
+          title: t.title,
+        })),
+      };
+    } catch (err) {
+      return {
+        active: false,
+        targets: [],
+        error: err instanceof Error ? err.message : "Live View unavailable",
+      };
+    }
+  }
+
+  /**
+   * Fetch the rrweb recording for a finished browser session (needs recording
+   * to have been enabled when it ran, plus CF_ACCOUNT_ID + a CF_API_TOKEN with
+   * Browser Rendering read — the Worker binding can't read recordings). Returns
+   * the rrweb event arrays keyed by tab, ready for rrweb-player.
+   */
+  @callable()
+  async browserRecording(sessionId: string): Promise<BrowserRecordingResult> {
+    if (!this.env.CF_ACCOUNT_ID || !this.env.CF_API_TOKEN) {
+      return {
+        ok: false,
+        error:
+          "Recording playback needs CF_ACCOUNT_ID and a CF_API_TOKEN secret with Browser Rendering read access.",
+      };
+    }
+    try {
+      const rec = await getBrowserRecording({
+        accountId: this.env.CF_ACCOUNT_ID,
+        apiToken: this.env.CF_API_TOKEN,
+        sessionId: String(sessionId),
+      });
+      return { ok: true, sessionId: rec.sessionId, durationMs: rec.duration, events: rec.events };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : "Recording not found" };
+    }
+  }
+
   @callable()
   getMemory(): string {
     return this.session.getContextBlock("memory")?.content ?? "";
@@ -993,6 +1153,30 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     }
     return byServer;
   }
+}
+
+/** Map a Codemode Snippet to the client view (drops nothing sensitive). */
+function toSnippetView(s: Snippet): SnippetView {
+  return {
+    name: s.name,
+    description: s.description,
+    code: s.code,
+    savedAt: s.savedAt,
+    connectors: s.connectors ?? [],
+  };
+}
+
+/** Map a Codemode ExecutionState to the client audit view. */
+function toExecutionView(e: ExecutionState): ExecutionView {
+  return {
+    id: e.id,
+    code: e.code,
+    status: e.status,
+    result: e.result,
+    error: e.error,
+    steps: e.log?.length ?? 0,
+    createdAt: e.createdAt,
+  };
 }
 
 export default {

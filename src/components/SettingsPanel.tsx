@@ -105,6 +105,14 @@ export function SettingsPanel({
             <Switch checked={s.autoSkills} onCheckedChange={(v) => patch({ autoSkills: v })} aria-label="Auto skill proposals" />
           </div>
 
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <Text>Record browser sessions</Text>
+              <Text variant="secondary" size="sm">Capture browser automation as replayable rrweb recordings. View live sessions and replays in the Lab tab. Playback needs Cloudflare API credentials.</Text>
+            </div>
+            <Switch checked={s.browserRecording} onCheckedChange={(v) => patch({ browserRecording: v })} aria-label="Record browser sessions" />
+          </div>
+
           <Field label="Tool approval" description="Baseline policy by risk. 'Always' gates every write/destructive/external tool (bash, code execution, browser, MCP, delete…); 'destructive-only' gates destructive + external; 'never' gates nothing.">
             <Select
               value={s.approvalMode}

@@ -21,6 +21,8 @@ interface Env {
   TELEGRAM_BOT_USERNAME?: string;
   TELEGRAM_WEBHOOK_SECRET_TOKEN?: string;
   MCP_SERVER_URL?: string;
+  /** Bearer token gating Holston's own MCP server at /mcp (owner secret). */
+  MCP_ACCESS_KEY?: string;
   /** For fetching browser session recordings via the REST API (owner secrets). */
   CF_ACCOUNT_ID?: string;
   CF_API_TOKEN?: string;

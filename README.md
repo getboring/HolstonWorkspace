@@ -16,15 +16,19 @@
 - **Client-managed MCP** (add/remove/authenticate MCP servers from the UI, live tool counts and OAuth handoff — no more single hardcoded env var)
 - **Reminders & recurring tasks** (natural-language scheduling in your timezone: "every weekday at 9am"; fires across push, Telegram, email, and the chat; DST drift self-corrects on wake)
 - **Web Push** (VAPID; reach the user with reminders and proactive messages even when the tab is closed)
-- **Actions with receipts** (gated server actions — send_message, set_reminder, save_memory, remove_skill — following the Boring Stack write-path: validate → idempotency → authorize → execute → immutable receipt; every one auditable in the Receipts tab)
-- **Persistent memory** (durable facts the model remembers across conversations via a writable context block, plus non-destructive compaction and FTS5 history search)
-- **Synced settings** (model, auto-skills, tool-approval mode, timezone, custom instructions — stored on the agent, drive every turn)
+- **Actions with receipts** (gated server actions — send_message, set_reminder, save_memory, remove_skill — following the Boring Stack write-path: validate → idempotency → authorize → execute → immutable receipt; the Receipts tab paginates the ledger and exports it as NDJSON)
+- **Unified tool-approval policy** (one risk registry classifies every tool — read / write / destructive / external — so `beforeToolCall`, action gates, and the Settings UI all agree; a baseline mode _plus_ per-tool always/never overrides, so code execution, browser, and MCP tools are gated in "always" mode instead of silently bypassing it)
+- **AI budget metering** (per-DO daily call ceiling in SQLite; the turn is blocked when the budget is spent, and the Settings panel shows a live usage meter)
+- **System Health log** (scheduled-task, chat-recovery, background-work, and MCP failures land in a durable `agent_events` table instead of a console that vanishes; filterable/paginated Health tab, NDJSON export, and critical failures also notify you)
+- **Persistent memory** (durable facts the model remembers across conversations via a writable context block — editable/correctable from the Memory card — plus non-destructive compaction and full-text history search in the sidebar)
+- **Synced settings** (model, auto-skills, tool-approval mode + per-tool overrides, timezone, custom instructions — stored on the agent, drive every turn; every write surfaces failure instead of silently no-op'ing)
 - **Multi-platform messaging** (Telegram, Email in + out with AI triage, WebSocket chat)
 - **Scheduled tasks** (declarative cron DSL: daily digest, weekly skill review)
 - **Voice input** (STT dictation via @cloudflare/voice)
-- **Resilience** (circuit breaker on external calls, context-overflow compact-and-retry, stall watchdog, diagnostics subscriptions for scheduled-task/chat/MCP failures)
+- **Resilience** (circuit breaker on external calls, context-overflow compact-and-retry, stall watchdog, rate-limit classification, diagnostics subscriptions persisted to the health log)
 - **Cloudflare Access** (JWT auth at edge, per-user agent isolation, state read-only from clients, CSRF guard on browser mutations)
-- **Kumo UI** (Cloudflare's design system — accessible, themed, light/dark; Chat, Tasks, MCP, Skills, Receipts, Settings tabs)
+- **Onboarding** (a fresh chat shows clickable starter prompts that each exercise a real capability, so a first-run user discovers what Holston can do)
+- **Kumo UI** (Cloudflare's design system — accessible, themed, light/dark; Chat, Tasks, MCP, Skills, Receipts, Health, Settings tabs)
 - **Tool approval** (Kumo dialog for gated operations; `approvalMode` enforced via `beforeToolCall`)
 - **Reasoning traces + error boundary** (collapsible reasoning; graceful error handling)
 
@@ -45,10 +49,13 @@ src/server.ts          HolstonAgent (Think): synced state, @callable RPC, getToo
                        browser + skills), getActions, configureSession, classifyChatError,
                        beforeToolCall gate, onEmail (triage + reply), Worker fetch/email handler
 src/actions.ts         Think action() tools (send_message, set_reminder, save_memory, remove_skill)
-src/receipts.ts        Immutable append-only receipt ledger in DO SQLite (UNIQUE + read index)
-src/observability.ts   diagnostics_channel subscriptions (schedule / chat / fiber / mcp failures)
+src/receipts.ts        Immutable append-only receipt ledger in DO SQLite (UNIQUE + read index, keyset pagination, NDJSON export)
+src/events.ts          Persistent System Health log (agent_events SQLite: severity/source/kind, cursor pagination, bounded retention, export)
+src/usage.ts           UsageMeter — per-DO daily AI-call budget in SQLite
+src/observability.ts   diagnostics_channel subscriptions (schedule / chat / fiber / mcp) → event sink (persist + notify on critical)
 src/shared/state.ts    HolstonState contract shared by server + client
 src/core/result.ts     Result<T> / ok / fail / statusFor (never-throw convention)
+src/core/tool-policy.ts  Unified tool risk registry + shouldApprove (single source of truth for gating)
 src/core/circuit-breaker.ts  withCircuitBreaker / withTimeout for external calls
 src/core/csrf.ts       assertSameOrigin (CSRF guard for browser mutations)
 src/push.ts            Web Push (VAPID) send helper, dead-subscription pruning
@@ -58,8 +65,10 @@ src/skills/hooks.ts    beforeTurn (retriever) + onChatResponse (nudger + curator
 src/skills/tools.ts    skill_create, skill_patch, skill_load, skill_list, skill_search
 src/app.tsx            React app shell (Kumo Tabs, Toasty, typed agent stub)
 src/lib/push.ts        Client-side push subscribe (service worker + VAPID)
+src/lib/download.ts    Client NDJSON download helper (receipts + health export)
+src/lib/tools.ts       GATED_TOOLS list for the Settings per-tool override UI
 src/components/        ChatView, TasksPanel, McpPanel, SkillsPanel, SettingsPanel, ReceiptsPanel,
-                       MemoryCard, ToolApproval, SessionList (all Kumo)
+                       HealthPanel, MemoryCard, ToolApproval, SessionList (all Kumo)
 public/sw.js           Push service worker
 skills/                Bundled SKILL.md files (agents:skills)
 docs/plans/            Capability audit + build plans
@@ -71,12 +80,15 @@ The UI drives the agent through typed RPC (`agent.stub.*`), not env vars or loca
 
 | Method | Purpose |
 |--------|---------|
-| `updateSettings(patch)` | Model, auto-skills, approval mode, timezone, custom instructions (synced state) |
-| `connectMcpServer(name, url)` / `disconnectMcpServer(id)` / `refreshMcpServers()` | Manage MCP servers; OAuth returns an `authUrl` |
+| `updateSettings(patch)` | Model, auto-skills, approval mode + per-tool overrides, timezone, custom instructions (synced state) |
+| `connectMcpServer(name, url)` / `disconnectMcpServer(id)` / `refreshMcpServers()` / `listMcpTools()` | Manage MCP servers (OAuth returns an `authUrl`) and list each server's tool names |
 | `createReminder(text)` / `listReminders()` / `cancelReminder(id)` | Natural-language scheduling (in the user's timezone) |
 | `getVapidPublicKey()` / `subscribePush(sub)` / `unsubscribePush(endpoint)` | Web Push subscription |
-| `listReceipts(limit)` | Immutable action-receipt ledger (Receipts tab) |
-| `getMemory()` | The durable `memory` context block (Memory card) |
+| `listReceipts(limit)` / `listReceiptsPage({limit,cursor})` / `exportReceipts()` | Immutable action-receipt ledger — capped list, keyset page, NDJSON export (Receipts tab) |
+| `listEvents({limit,cursor,severities})` / `exportEvents()` | System Health event log — paginated, severity-filtered, NDJSON export (Health tab) |
+| `getUsage()` | Today's AI-call budget snapshot (Settings meter) |
+| `searchHistory(query,limit)` | Full-text search over conversation history (sidebar) |
+| `getMemory()` / `setMemory(content)` | Read / replace the durable `memory` context block (editable Memory card) |
 
 Actions the model can call (compiled into tools via `getActions()`): `send_message`, `set_reminder`, `save_memory`, `remove_skill` — each gated by `approvalMode`, idempotency-keyed, and receipted. Code execution (`execute`) and browser tools (`browser_*`) are added when the `LOADER` / `BROWSER` bindings are present.
 

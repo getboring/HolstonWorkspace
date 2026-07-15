@@ -24,8 +24,10 @@ export interface HolstonSettings {
   model: WorkersAiModelId;
   /** Curator proposes skills after complex turns (staged for approval). */
   autoSkills: boolean;
-  /** Governs the tool-approval gate surfaced to the user. */
+  /** Baseline tool-approval policy applied by risk tier. */
   approvalMode: ApprovalMode;
+  /** Per-tool overrides that win over approvalMode ("always" | "never"). */
+  toolApprovals: Record<string, "always" | "never">;
   /** IANA timezone for reminders and wall-clock schedules (e.g. America/New_York). */
   timezone: string;
   /** Extra instruction appended to the system prompt (user-editable persona). */
@@ -38,6 +40,7 @@ export const DEFAULT_SETTINGS: HolstonSettings = {
   model: DEFAULT_MODEL,
   autoSkills: true,
   approvalMode: "destructive-only",
+  toolApprovals: {},
   timezone: DEFAULT_TIMEZONE,
   customInstructions: "",
 };
@@ -114,6 +117,15 @@ export interface ReceiptView {
   createdAt: string;
 }
 
+/** Today's AI-call budget snapshot (mirrors UsageSnapshot; synced to clients). */
+export interface UsageView {
+  day: string;
+  calls: number;
+  limit: number;
+  remaining: number;
+  exceeded: boolean;
+}
+
 export interface HolstonState {
   settings: HolstonSettings;
   reminders: ReminderView[];
@@ -121,6 +133,10 @@ export interface HolstonState {
   pushSubscriptions: PushSubscriptionRecord[];
   /** Count of receipts written, so the UI can badge the Receipts tab. */
   receiptCount: number;
+  /** Today's AI usage vs. the daily ceiling. */
+  usage: UsageView | null;
+  /** Count of error+critical health events, so the UI can badge System Health. */
+  healthAlerts: number;
   /** Bumped whenever the agent wants clients to refetch derived data. */
   revision: number;
 }
@@ -131,6 +147,8 @@ export const INITIAL_STATE: HolstonState = {
   mcpServers: [],
   pushSubscriptions: [],
   receiptCount: 0,
+  usage: null,
+  healthAlerts: 0,
   revision: 0,
 };
 

@@ -11,6 +11,7 @@ import {
   LightningIcon,
   MoonIcon,
   PlugsConnectedIcon,
+  HeartbeatIcon,
   ReceiptIcon,
   SidebarIcon,
   SparkleIcon,
@@ -21,6 +22,7 @@ import { isToolUIPart, type UIMessage } from "ai";
 import { useAgent } from "agents/react";
 import { useEffect, useState } from "react";
 import { ChatView } from "./components/ChatView";
+import { HealthPanel } from "./components/HealthPanel";
 import { McpPanel } from "./components/McpPanel";
 import { PoweredBy } from "./components/PoweredBy";
 import { ReceiptsPanel } from "./components/ReceiptsPanel";
@@ -32,7 +34,7 @@ import { ToolApproval } from "./components/ToolApproval";
 import type { HolstonAgent } from "./server";
 import { INITIAL_STATE, type HolstonState } from "./shared/state";
 
-type Tab = "chat" | "tasks" | "mcp" | "skills" | "receipts" | "settings";
+type Tab = "chat" | "tasks" | "mcp" | "skills" | "receipts" | "health" | "settings";
 
 export function App() {
   const [dark, setDark] = useState(() => {
@@ -133,6 +135,7 @@ function Workspace({ agentName, dark, setDark }: { agentName: string; dark: bool
     { value: "mcp", label: "MCP", icon: PlugsConnectedIcon, badge: state.mcpServers.length },
     { value: "skills", label: "Skills", icon: SparkleIcon },
     { value: "receipts", label: "Receipts", icon: ReceiptIcon, badge: state.receiptCount },
+    { value: "health", label: "Health", icon: HeartbeatIcon, badge: state.healthAlerts },
     { value: "settings", label: "Settings", icon: GearIcon },
   ] as const;
 
@@ -140,7 +143,7 @@ function Workspace({ agentName, dark, setDark }: { agentName: string; dark: bool
     <div className="holston-app bg-kumo-canvas text-kumo-default" data-mode={dark ? "dark" : "light"}>
       {sidebarOpen && (
         <aside className="w-64 shrink-0 border-r border-kumo-hairline bg-kumo-base overflow-hidden hidden md:block">
-          <SessionList messages={messages as UIMessage[]} />
+          <SessionList agent={agent} messages={messages as UIMessage[]} />
         </aside>
       )}
 
@@ -186,6 +189,7 @@ function Workspace({ agentName, dark, setDark }: { agentName: string; dark: bool
           {activeTab === "mcp" && <McpPanel agent={agent} state={state} />}
           {activeTab === "skills" && <SkillsPanel />}
           {activeTab === "receipts" && <ReceiptsPanel agent={agent} />}
+          {activeTab === "health" && <HealthPanel agent={agent} />}
           {activeTab === "settings" && <SettingsPanel agent={agent} state={state} />}
         </main>
 

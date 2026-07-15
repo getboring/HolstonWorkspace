@@ -14,6 +14,12 @@ export interface Receipt {
   createdAt: string;
 }
 
+export interface ReceiptPage {
+  receipts: Receipt[];
+  /** Opaque cursor for the next (older) page, or null at the end. */
+  nextCursor: string | null;
+}
+
 /** Structural slice of Agent#sql so this stays decoupled from the agent class. */
 export interface AgentSql {
   sql<T = Record<string, string | number | boolean | null>>(
@@ -92,30 +98,83 @@ export class ReceiptStore {
 
   /** Most-recent receipts first, capped. */
   list(limit = 100): Receipt[] {
-    const rows = this.agent.sql<{
-      id: string;
-      action: string;
-      idempotency_key: string | null;
-      input_json: string | null;
-      output_json: string | null;
-      actor: string;
-      created_at: string;
-    }>`
+    const rows = this.agent.sql<ReceiptRow>`
       SELECT id, action, idempotency_key, input_json, output_json, actor, created_at
       FROM action_receipts
       ORDER BY created_at DESC
       LIMIT ${Math.min(Math.max(limit, 1), 500)}`;
 
-    return rows.map((r) => ({
-      id: r.id,
-      action: r.action,
-      idempotencyKey: r.idempotency_key,
-      input: safeParse(r.input_json),
-      output: safeParse(r.output_json),
-      actor: r.actor,
-      createdAt: r.created_at,
-    }));
+    return rows.map(toReceipt);
   }
+
+  /**
+   * One newest-first page. `cursor` encodes the last row of the prior page as
+   * `"<created_at>|<id>"`; pass null for the first page. Ordering is by
+   * (created_at DESC, id DESC) so rows sharing a millisecond can't be skipped
+   * or repeated across pages.
+   */
+  page(opts?: { limit?: number; cursor?: string | null }): ReceiptPage {
+    const limit = Math.min(Math.max(opts?.limit ?? 50, 1), 200);
+    const [curCreated, curId] = decodeCursor(opts?.cursor);
+
+    // Keyset predicate: rows strictly "older" than the cursor in the composite
+    // (created_at, id) order. First page uses sentinels that admit everything.
+    const rows = this.agent.sql<ReceiptRow>`
+      SELECT id, action, idempotency_key, input_json, output_json, actor, created_at
+      FROM action_receipts
+      WHERE (created_at < ${curCreated})
+         OR (created_at = ${curCreated} AND id < ${curId})
+      ORDER BY created_at DESC, id DESC
+      LIMIT ${limit + 1}`;
+
+    const hasMore = rows.length > limit;
+    const pageRows = hasMore ? rows.slice(0, limit) : rows;
+    const last = pageRows[pageRows.length - 1];
+    const nextCursor =
+      hasMore && last ? `${last.created_at}|${last.id}` : null;
+
+    return { receipts: pageRows.map(toReceipt), nextCursor };
+  }
+
+  /** All receipts as NDJSON (newest-first) for export/download. */
+  export(): string {
+    const rows = this.agent.sql<ReceiptRow>`
+      SELECT id, action, idempotency_key, input_json, output_json, actor, created_at
+      FROM action_receipts
+      ORDER BY created_at DESC, id DESC`;
+    return rows.map((r) => JSON.stringify(toReceipt(r))).join("\n");
+  }
+}
+
+interface ReceiptRow {
+  id: string;
+  action: string;
+  idempotency_key: string | null;
+  input_json: string | null;
+  output_json: string | null;
+  actor: string;
+  created_at: string;
+}
+
+function toReceipt(r: ReceiptRow): Receipt {
+  return {
+    id: r.id,
+    action: r.action,
+    idempotencyKey: r.idempotency_key,
+    input: safeParse(r.input_json),
+    output: safeParse(r.output_json),
+    actor: r.actor,
+    createdAt: r.created_at,
+  };
+}
+
+/** Decode a "<created_at>|<id>" cursor into a keyset pair; sentinels admit all. */
+function decodeCursor(cursor?: string | null): [string, string] {
+  // "~" sorts high in ASCII, so the first-page sentinel is > any real value.
+  if (!cursor) return ["~", "~"];
+  const idx = cursor.indexOf("|");
+  if (idx === -1) return ["~", "~"];
+  return [cursor.slice(0, idx), cursor.slice(idx + 1)];
 }
 
 function safeParse(json: string | null): unknown {

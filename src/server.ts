@@ -21,34 +21,34 @@ import telegramMessenger from "@cloudflare/think/messengers/telegram";
 import { createBrowserTools } from "@cloudflare/think/tools/browser";
 import { createExecuteTool } from "@cloudflare/think/tools/execute";
 import { CodemodeRuntime } from "@cloudflare/codemode";
-import {
-  callable,
-  getAgentByName,
-  routeAgentEmail,
-  routeAgentRequest,
-  type Schedule,
-} from "agents";
-import {
-  createSecureReplyEmailResolver,
-  isAutoReplyEmail,
-  type AgentEmail,
-} from "agents/email";
+import { callable, type Schedule } from "agents";
+import { isAutoReplyEmail, type AgentEmail } from "agents/email";
 import bundledSkills from "agents:skills";
 import { generateObject, generateText, type ToolSet } from "ai";
 import PostalMime from "postal-mime";
 import { createWorkersAI } from "workers-ai-provider";
-import { z } from "zod";
 import {
   createCompactFunction,
   estimateMessageTokens,
 } from "agents/experimental/memory/utils";
 import { R2SkillProvider } from "agents/experimental/memory/session";
 import { createActions } from "./actions";
-import { agentNameFromEmail, verifyAccessJWT, type AuthUser } from "./auth";
-import { assertSameOrigin } from "./core/csrf";
+import { riskFor, shouldApprove } from "./core/tool-policy";
+import { classifyEmail, lastAssistantText, stripHtml } from "./lib/email";
+import {
+  formatLocal,
+  localWallClockToUtc,
+  reminderParseSchema,
+  shiftCronToUtc,
+  toReminderView,
+  type ReminderPayload,
+} from "./lib/time";
+import { EventLog, type EventPage, type EventSeverity } from "./events";
+import { handleEmail, handleFetch } from "./lib/worker";
 import { subscribeObservability } from "./observability";
 import { sendPush } from "./push";
-import { ReceiptStore, type Receipt } from "./receipts";
+import { ReceiptStore, type Receipt, type ReceiptPage } from "./receipts";
+import { UsageMeter, type UsageSnapshot } from "./usage";
 import {
   DEFAULT_MODEL,
   DEFAULT_SETTINGS,
@@ -71,24 +71,16 @@ import { createSkillTools } from "./skills/tools";
 // WorkerLoader can instantiate it for the execute tool.
 export { ThinkMessengerStateAgent, CodemodeRuntime };
 
-const DEFAULT_AGENT = "default";
-const AGENT_CLASS = "HolstonAgent";
-const SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{1,63}$/;
 const REMINDER_CALLBACK = "runReminder";
 
-/**
- * Reminder schedule payload. `localCron`/`tz` are present only for recurring
- * reminders, so the UTC cron can be re-derived across DST transitions.
- */
-interface ReminderPayload {
-  message: string;
-  localCron?: string;
-  tz?: string;
-}
-
-// Built-in workspace tools that can mutate the workspace or run code. Gated by
-// approvalMode; read-only tools (read/list/find/grep) are never gated.
-const DESTRUCTIVE_TOOLS = new Set(["bash", "write", "edit", "delete"]);
+// Action tool names — these carry their own approval, so beforeToolCall skips
+// them (blocking would replace the modal prompt).
+const ACTION_NAMES = new Set([
+  "send_message",
+  "set_reminder",
+  "save_memory",
+  "remove_skill",
+]);
 
 export class HolstonAgent extends Think<Env, HolstonState> {
   chatRecovery = true;
@@ -115,13 +107,34 @@ export class HolstonAgent extends Think<Env, HolstonState> {
 
   #skillStore?: SkillStore;
   #receiptStore?: ReceiptStore;
+  #usageMeter?: UsageMeter;
+  #eventLog?: EventLog;
   #obsDisposer?: () => void;
 
   override async onStart() {
     // Surface scheduled-task / chat-recovery / MCP failures that are otherwise
     // silent. Idempotent per isolate — dispose any prior subscription first.
+    // The sink persists each event to the System Health log and pushes a
+    // notification for the critical ones.
     this.#obsDisposer?.();
-    this.#obsDisposer = subscribeObservability();
+    this.#obsDisposer = subscribeObservability((event) => {
+      this.eventLog().record({
+        severity: event.severity,
+        source: event.source,
+        kind: event.kind,
+        message: event.message,
+        detail: event.detail,
+      });
+      this.syncHealth();
+      if (event.notify) {
+        // Fire-and-forget: notification failure must not break the channel.
+        void this.notifyUser("Holston needs attention", event.message, {
+          url: "/",
+        }).catch((err) =>
+          console.error("[holston] health notify failed:", err),
+        );
+      }
+    });
 
     // Schema evolution: backfill any settings fields added after this DO's
     // state was first persisted (e.g. `timezone`), so older instances get new
@@ -131,12 +144,21 @@ export class HolstonAgent extends Think<Env, HolstonState> {
       this.setState({ ...this.state, settings: merged });
     }
     this.syncReceiptCount();
+    this.syncUsage();
+    this.syncHealth();
 
     if (this.env.MCP_SERVER_URL) {
       try {
         await this.addMcpServer("holston-mcp", this.env.MCP_SERVER_URL);
       } catch (err) {
         console.error("[holston] MCP server registration failed:", err);
+        this.logEvent(
+          "error",
+          "mcp",
+          "mcp:registration_failed",
+          "Failed to register the configured MCP server on startup.",
+          { url: this.env.MCP_SERVER_URL, error: String(err) },
+        );
       }
     }
     // Correct any recurring-reminder DST drift, then reconcile the synced view
@@ -190,10 +212,19 @@ export class HolstonAgent extends Think<Env, HolstonState> {
   }
 
   override getTools() {
-    // Skill-write tools honor approvalMode: gated in always/destructive-only,
-    // ungated in never. (Skill writes are treated as destructive.)
-    const gated = this.state?.settings.approvalMode !== "never";
-    const tools: ToolSet = createSkillTools(this.skillStore(), this, gated);
+    // Skill-write tools consult the shared tool-policy for their needsApproval
+    // modal (one source of truth — same as beforeToolCall and actions).
+    const s = this.state?.settings;
+    const skillWriteGated = shouldApprove(
+      "skill_create",
+      s?.approvalMode ?? "destructive-only",
+      s?.toolApprovals,
+    );
+    const tools: ToolSet = createSkillTools(
+      this.skillStore(),
+      this,
+      skillWriteGated,
+    );
 
     // Cloudflare-native code execution (Codemode): runs model-generated code in
     // an isolated Worker via LOADER, with state.* (the DO workspace), tools.*,
@@ -233,6 +264,7 @@ export class HolstonAgent extends Think<Env, HolstonState> {
       receipts: this.receiptStore(),
       actor: this.name,
       approvalMode: this.state?.settings.approvalMode ?? "destructive-only",
+      toolApprovals: this.state?.settings.toolApprovals,
       notify: (title, body, opts) => this.notifyUser(title, body, opts),
       saveMemory: (fact) => this.saveMemory(fact),
       createReminder: async (request) => {
@@ -332,12 +364,22 @@ export class HolstonAgent extends Think<Env, HolstonState> {
   }
 
   override async beforeTurn(ctx: TurnContext): Promise<TurnConfig | void> {
+    // Daily AI budget: a runaway agent (email loop, hammering MCP) hits a
+    // ceiling instead of draining the account's Workers AI budget.
+    if (!this.usageMeter().canSpend()) {
+      throw new Error(
+        "Daily AI budget reached. It resets at midnight UTC. Raise the limit in Settings if this is expected.",
+      );
+    }
     if (this.state?.settings.autoSkills === false) return;
     const system = await retrieverHook(this.skillStore(), ctx);
     if (system) return { system };
   }
 
   override async onChatResponse(result: ChatResponseResult) {
+    // Count this turn against the daily budget.
+    this.usageMeter().record();
+    this.syncUsage();
     nudgerHook(this, result);
     if (this.state?.settings.autoSkills !== false) {
       await curatorHook(this.skillStore(), this.env.AI, result);
@@ -371,29 +413,42 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     ) {
       return "context_overflow";
     }
+    // Workers AI rate limiting (429 / capacity). Surfaced so the failure is
+    // classified rather than a generic error.
+    const status = (error as { statusCode?: number; status?: number })?.statusCode
+      ?? (error as { status?: number })?.status;
+    if (status === 429 || /rate.?limit|too many requests|capacity|429/i.test(haystack)) {
+      return "rate_limit";
+    }
   }
 
   /**
-   * Enforce approvalMode for built-in workspace tools. beforeToolCall can only
-   * allow/block/substitute (it can't raise the client approval modal — that's
-   * driven by a tool's needsApproval), so:
-   *   - never / destructive-only: built-in tools run (destructive-only relies on
-   *     the model + skill-tool modals; built-in file writes are already sandboxed
-   *     to the DO's own workspace, not the user's machine).
-   *   - always: block destructive built-in tools so nothing mutates without an
-   *     explicit human step; the model surfaces the reason and can ask first.
+   * Enforce the tool-policy for EVERY tool the model calls — built-in workspace
+   * tools, code execution, browser, and MCP tools alike. beforeToolCall can only
+   * allow/block/substitute (it can't raise the client approval modal — that's a
+   * tool's own needsApproval), so this is the *block* half of the policy: when a
+   * tool should be approved but has no modal path (execute/browser/MCP/built-ins),
+   * we block it with a reason so nothing runs without an explicit human step.
+   * Skill-write tools and actions carry their own needsApproval/approval, which
+   * consult the SAME `shouldApprove` — one source of truth (src/core/tool-policy).
    */
-  override beforeToolCall(
-    ctx: ToolCallContext,
-  ): ToolCallDecision | void {
-    const mode = this.state?.settings.approvalMode ?? "destructive-only";
-    if (mode !== "always") return;
-    if (DESTRUCTIVE_TOOLS.has(ctx.toolName)) {
+  override beforeToolCall(ctx: ToolCallContext): ToolCallDecision | void {
+    const s = this.state?.settings;
+    const mode = s?.approvalMode ?? "destructive-only";
+    // Skill tools + actions already surface an approval modal via needsApproval;
+    // don't double-gate them here (that would block instead of prompt).
+    if (
+      ctx.toolName.startsWith("skill_") ||
+      ACTION_NAMES.has(ctx.toolName)
+    ) {
+      return;
+    }
+    if (shouldApprove(ctx.toolName, mode, s?.toolApprovals)) {
       return {
         action: "block",
         reason:
-          `Approval mode is "always": the ${ctx.toolName} tool is blocked. ` +
-          "Explain what you would run and ask the user to confirm or lower the approval setting.",
+          `Tool "${ctx.toolName}" (${riskFor(ctx.toolName)} risk) requires approval under your current settings. ` +
+          "Explain what you intend to do and ask the user to confirm, or lower the approval setting for this tool.",
       };
     }
   }
@@ -417,6 +472,13 @@ export class HolstonAgent extends Think<Env, HolstonState> {
         throw new Error("Invalid approval mode");
       }
       next.approvalMode = patch.approvalMode;
+    }
+    if (patch.toolApprovals !== undefined) {
+      const cleaned: Record<string, "always" | "never"> = {};
+      for (const [tool, v] of Object.entries(patch.toolApprovals)) {
+        if (v === "always" || v === "never") cleaned[tool] = v;
+      }
+      next.toolApprovals = cleaned;
     }
     if (patch.timezone !== undefined) {
       if (!isValidTimezone(patch.timezone)) {
@@ -665,6 +727,13 @@ export class HolstonAgent extends Think<Env, HolstonState> {
           });
         } catch (err) {
           console.error("[holston] email reply failed:", err);
+          this.logEvent(
+            "error",
+            "email",
+            "email:reply_failed",
+            "Failed to send an email reply.",
+            { subject, error: String(err) },
+          );
         }
       }
     }
@@ -716,6 +785,13 @@ export class HolstonAgent extends Think<Env, HolstonState> {
         });
       } catch (err) {
         console.error("[holston] notify email failed:", err);
+        this.logEvent(
+          "warning",
+          "notify",
+          "notify:email_failed",
+          "Failed to deliver a notification email.",
+          { title, error: String(err) },
+        );
       }
     }
   }
@@ -778,12 +854,46 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     return this.#receiptStore;
   }
 
+  private usageMeter(): UsageMeter {
+    this.#usageMeter ??= new UsageMeter(this);
+    return this.#usageMeter;
+  }
+
+  private eventLog(): EventLog {
+    this.#eventLog ??= new EventLog(this);
+    return this.#eventLog;
+  }
+
   private syncReceiptCount() {
     // Touch the store first so the table exists (its constructor creates it).
     const count = this.receiptStore().count();
     if (count !== this.state.receiptCount) {
       this.setState({ ...this.state, receiptCount: count });
     }
+  }
+
+  private syncUsage() {
+    this.setState({ ...this.state, usage: this.usageMeter().snapshot() });
+  }
+
+  /** Push the error/critical count into synced state so the UI can badge it. */
+  private syncHealth() {
+    const unhealthy = this.eventLog().count(["error", "critical"]);
+    if (unhealthy !== this.state.healthAlerts) {
+      this.setState({ ...this.state, healthAlerts: unhealthy });
+    }
+  }
+
+  /** Record an operational event to System Health and refresh the badge. */
+  private logEvent(
+    severity: EventSeverity,
+    source: string,
+    kind: string,
+    message: string,
+    detail?: unknown,
+  ) {
+    this.eventLog().record({ severity, source, kind, message, detail });
+    this.syncHealth();
   }
 
   /** Append a durable fact to the writable `memory` context block. */
@@ -801,386 +911,91 @@ export class HolstonAgent extends Think<Env, HolstonState> {
     return this.receiptStore().list(limit);
   }
 
+  /** One newest-first page of receipts with a keyset cursor. */
+  @callable()
+  listReceiptsPage(opts?: { limit?: number; cursor?: string | null }): ReceiptPage {
+    return this.receiptStore().page(opts);
+  }
+
+  /** Every receipt as NDJSON, for download/export. */
+  @callable()
+  exportReceipts(): string {
+    return this.receiptStore().export();
+  }
+
+  /** One page of System Health events, newest-first, with a next cursor. */
+  @callable()
+  listEvents(opts?: {
+    limit?: number;
+    cursor?: string | null;
+    severities?: EventSeverity[];
+  }): EventPage {
+    return this.eventLog().page(opts);
+  }
+
+  /** Every retained health event as NDJSON, for download/export. */
+  @callable()
+  exportEvents(): string {
+    return this.eventLog()
+      .all()
+      .map((e) => JSON.stringify(e))
+      .join("\n");
+  }
+
   @callable()
   getMemory(): string {
     return this.session.getContextBlock("memory")?.content ?? "";
   }
-}
 
-// All fields required (not optional) so small models can't skip the time —
-// the failure mode was `{message, kind:"once"}` with datetime omitted. For the
-// branch that doesn't apply, the model emits the empty-string sentinel.
-const reminderParseSchema = z.object({
-  message: z
-    .string()
-    .describe("What to be reminded about, imperative, no time words"),
-  kind: z
-    .enum(["once", "recurring"])
-    .describe("once = single time, recurring = repeats"),
-  datetime: z
-    .string()
-    .describe(
-      'When kind is "once": LOCAL wall-clock timestamp "YYYY-MM-DDTHH:MM:SS" with NO timezone suffix, e.g. "2026-07-15T15:00:00". When kind is "recurring": empty string "".',
-    ),
-  cron: z
-    .string()
-    .describe(
-      'When kind is "recurring": 5-field LOCAL cron expression, e.g. "0 9 * * 1-5". When kind is "once": empty string "".',
-    ),
-});
-
-const emailTriageSchema = z.object({
-  classification: z
-    .enum(["actionable", "notification", "spam"])
-    .describe("actionable = needs a reply; notification = FYI only; spam = junk"),
-  shouldReply: z
-    .boolean()
-    .describe("Whether a reply is warranted (false for notifications/spam)"),
-  summary: z.string().max(200).describe("One-line summary of the email"),
-});
-
-/**
- * Lightweight AI triage before spending a full turn on an email: drop spam,
- * and only reply when the email actually asks for something.
- */
-async function classifyEmail(
-  ai: Ai,
-  subject: string,
-  body: string,
-): Promise<{ classification: "actionable" | "notification" | "spam"; shouldReply: boolean; summary: string }> {
-  const model = createWorkersAI({ binding: ai })(DEFAULT_MODEL);
-  const { object } = await generateObject({
-    model,
-    schema: emailTriageSchema,
-    system:
-      "Triage an inbound email. Classify it and decide whether a reply is warranted. " +
-      "Notifications, receipts, and automated alerts are 'notification' with shouldReply false. " +
-      "Unsolicited marketing or scams are 'spam'. Genuine questions/requests are 'actionable'.",
-    prompt: `Subject: ${subject}\n\n${body.slice(0, 2000)}`,
-  });
-  return object;
-}
-
-/** Extract the text of the most recent assistant message (for email replies). */
-function lastAssistantText(
-  messages: Array<{ role: string; parts?: Array<{ type: string; text?: string }> }>,
-): string | undefined {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (m?.role !== "assistant") continue;
-    const text = (m.parts ?? [])
-      .filter((p) => p.type === "text")
-      .map((p) => p.text)
-      .join("\n")
-      .trim();
-    return text || undefined;
+  /** Replace the entire memory block (user editing/correcting remembered facts). */
+  @callable()
+  async setMemory(content: string): Promise<{ ok: boolean }> {
+    await this.session.replaceContextBlock("memory", String(content).slice(0, 8000));
+    await this.session.refreshSystemPrompt();
+    return { ok: true };
   }
-  return undefined;
-}
 
-/** Format a Date as a readable local time string in the given IANA zone. */
-function formatLocal(date: Date, timeZone: string): string {
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    dateStyle: "full",
-    timeStyle: "short",
-  }).format(date);
-}
-
-/**
- * The offset (minutes) of `timeZone` from UTC at instant `date`.
- * Positive means the zone is behind UTC (e.g. America/New_York = 240/300).
- */
-function tzOffsetMinutes(date: Date, timeZone: string): number {
-  const local = new Date(date.toLocaleString("en-US", { timeZone }));
-  const utc = new Date(date.toLocaleString("en-US", { timeZone: "UTC" }));
-  return Math.round((utc.getTime() - local.getTime()) / 60000);
-}
-
-/**
- * Interpret "YYYY-MM-DDTHH:MM:SS" as wall-clock time in `timeZone` and return
- * the real UTC instant. Returns null if unparseable.
- *
- * The offset must be evaluated at the RESULT instant, not the provisional
- * guess — near a DST boundary those differ by the DST delta. We converge in
- * two passes (a single correction is wrong exactly when the guess and result
- * straddle the transition).
- */
-function localWallClockToUtc(local: string, timeZone: string): Date | null {
-  const m = local
-    .trim()
-    .match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?/);
-  if (!m) return null;
-  const [, y, mo, d, h, mi, s] = m;
-  if (!y || !mo || !d || !h || !mi) return null;
-
-  const target = Date.UTC(+y, +mo - 1, +d, +h, +mi, s ? +s : 0);
-  // First correction using the offset at the provisional instant...
-  let result = target + tzOffsetMinutes(new Date(target), timeZone) * 60000;
-  // ...then re-evaluate at the corrected instant and adjust if the offset
-  // changed (a DST boundary lies between the two).
-  const refined = target + tzOffsetMinutes(new Date(result), timeZone) * 60000;
-  if (refined !== result) result = refined;
-
-  const date = new Date(result);
-  return Number.isNaN(date.getTime()) ? null : date;
-}
-
-/**
- * Shift a local 5-field cron expression's hour into UTC by the zone's current
- * offset (whole-hour zones only; DST shifts by ≤1h are acceptable for reminders).
- * Returns null if the expression isn't a standard 5-field cron.
- */
-function shiftCronToUtc(cron: string, timeZone: string): string | null {
-  const parts = cron.trim().split(/\s+/);
-  if (parts.length !== 5) return null;
-  const [min, hour, dom, mon, dow] = parts as [string, string, string, string, string];
-  if (hour === "*" || hour.includes(",") || hour.includes("/") || hour.includes("-")) {
-    // Non-simple hour field: leave as-is (best effort).
-    return cron.trim();
+  /** Today's AI usage snapshot (drives the Settings budget banner). */
+  @callable()
+  getUsage(): UsageSnapshot {
+    return this.usageMeter().snapshot();
   }
-  const h = Number(hour);
-  if (!Number.isInteger(h)) return null;
-  const offsetHours = tzOffsetMinutes(new Date(), timeZone) / 60;
-  const utcHour = ((h + offsetHours) % 24 + 24) % 24;
-  return `${min} ${Math.round(utcHour)} ${dom} ${mon} ${dow}`;
-}
 
-function toReminderView(
-  schedule: Schedule<ReminderPayload>,
-  timeZone: string,
-): ReminderView {
-  const message = schedule.payload?.message ?? "(reminder)";
-  const recurring = schedule.type === "cron" || schedule.type === "interval";
-  const nextRun = "time" in schedule ? schedule.time * 1000 : null;
-  let when: string;
-  switch (schedule.type) {
-    case "cron":
-      when = `cron: ${schedule.cron}`;
-      break;
-    case "interval":
-      when = `every ${schedule.intervalSeconds}s`;
-      break;
-    default:
-      // Render in the user's timezone, not the server/browser zone, so the
-      // displayed time matches what the user asked for.
-      when = nextRun
-        ? new Intl.DateTimeFormat("en-US", {
-            timeZone,
-            dateStyle: "medium",
-            timeStyle: "short",
-          }).format(new Date(nextRun))
-        : "scheduled";
+  /** Full-text search over this conversation's history (the FTS5 `history` block). */
+  @callable()
+  async searchHistory(
+    query: string,
+    limit = 10,
+  ): Promise<Array<{ id: string; role: string; content: string; createdAt?: string }>> {
+    const q = String(query ?? "").trim();
+    if (q.length < 2) return [];
+    try {
+      const results = await this.session.search(q, { limit });
+      return results.map((r) => ({
+        id: r.id,
+        role: r.role,
+        content: r.content,
+        createdAt: r.createdAt,
+      }));
+    } catch (err) {
+      console.warn("[holston] history search failed:", err);
+      return [];
+    }
   }
-  return { id: schedule.id, message, when, nextRun, kind: schedule.type, recurring };
-}
 
-// ── Worker fetch/email handlers ──────────────────────────────────────────
-
-function accessConfigured(env: Env): boolean {
-  return Boolean(env.TEAM_DOMAIN && env.POLICY_AUD);
-}
-
-async function authorize(
-  request: Request,
-  env: Env,
-): Promise<{ user: AuthUser | null } | Response> {
-  if (!accessConfigured(env)) return { user: null };
-  const user = await verifyAccessJWT(request, env);
-  if (!user) return new Response("Unauthorized", { status: 401 });
-  return { user };
-}
-
-function instanceForUser(user: AuthUser | null): string {
-  return user ? agentNameFromEmail(user.email) : DEFAULT_AGENT;
-}
-
-function ownerInstance(env: Env): string {
-  return env.OWNER_EMAIL ? agentNameFromEmail(env.OWNER_EMAIL) : DEFAULT_AGENT;
-}
-
-function allowedEmailSenders(env: Env): Set<string> {
-  const senders = new Set<string>();
-  for (const entry of (env.ALLOWED_EMAIL_SENDERS ?? "").split(",")) {
-    const email = entry.trim().toLowerCase();
-    if (email) senders.add(email);
+  /** The tool names each connected MCP server exposes (so the user can audit them). */
+  @callable()
+  listMcpTools(): Record<string, string[]> {
+    const mcp = this.getMcpServers();
+    const byServer: Record<string, string[]> = {};
+    for (const tool of mcp.tools) {
+      (byServer[tool.serverId] ??= []).push(tool.name);
+    }
+    return byServer;
   }
-  if (env.OWNER_EMAIL) senders.add(env.OWNER_EMAIL.trim().toLowerCase());
-  return senders;
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
-
-    if (url.pathname === "/health") {
-      return Response.json({
-        status: "ok",
-        agent: "holston-workspace",
-        timestamp: new Date().toISOString(),
-      });
-    }
-
-    const guardAgentRoute = async (
-      req: Request,
-      lobby: { name: string },
-    ): Promise<Response | undefined> => {
-      const auth = await authorize(req, env);
-      if (auth instanceof Response) return auth;
-      if (lobby.name !== instanceForUser(auth.user)) {
-        return new Response("Forbidden", { status: 403 });
-      }
-      return undefined;
-    };
-
-    const agentResponse = await routeAgentRequest(request, env, {
-      onBeforeConnect: guardAgentRoute,
-      onBeforeRequest: guardAgentRoute,
-    });
-    if (agentResponse) return agentResponse;
-
-    if (url.pathname.startsWith("/messengers/") && request.method === "POST") {
-      const agent = await getAgentByName(env.HolstonAgent, ownerInstance(env));
-      return agent.fetch(request);
-    }
-
-    if (
-      request.method === "POST" &&
-      url.pathname === "/setup/telegram-webhook"
-    ) {
-      const auth = await authorize(request, env);
-      if (auth instanceof Response) return auth;
-      return setupTelegramWebhook(request, env);
-    }
-
-    if (request.method === "GET" && url.pathname === "/setup/info") {
-      const auth = await authorize(request, env);
-      if (auth instanceof Response) return auth;
-      return Response.json({
-        agentName: instanceForUser(auth.user),
-        webhookPath: "/messengers/telegram/webhook",
-        authenticated: !!auth.user,
-        user: auth.user?.email ?? null,
-      });
-    }
-
-    if (request.method === "GET" && url.pathname === "/api/skills") {
-      const auth = await authorize(request, env);
-      if (auth instanceof Response) return auth;
-      const store = new SkillStore(env.SKILLS_BUCKET, env.SKILLS_INDEX, env.AI);
-      const [approved, pending] = await Promise.all([
-        store.list(),
-        store.listPending(),
-      ]);
-      return Response.json({ skills: approved, pending });
-    }
-
-    const pendingAction = url.pathname.match(
-      /^\/api\/skills\/pending\/([^/]+)\/(approve|reject)$/,
-    );
-    if (request.method === "POST" && pendingAction) {
-      // Browser-driven mutation: block cross-origin (CSRF) before auth.
-      const csrf = assertSameOrigin(request);
-      if (csrf) return csrf;
-      const auth = await authorize(request, env);
-      if (auth instanceof Response) return auth;
-      const name = decodeURIComponent(pendingAction[1] ?? "");
-      if (!SKILL_NAME_PATTERN.test(name)) {
-        return Response.json({ error: "Invalid skill name" }, { status: 400 });
-      }
-      const store = new SkillStore(env.SKILLS_BUCKET, env.SKILLS_INDEX, env.AI);
-      if (pendingAction[2] === "approve") {
-        const approved = await store.approvePending(name);
-        if (!approved) {
-          return Response.json(
-            { error: `No pending skill "${name}"` },
-            { status: 404 },
-          );
-        }
-        return Response.json({ ok: true, skill: approved });
-      }
-      await store.rejectPending(name);
-      return Response.json({ ok: true });
-    }
-
-    if (url.pathname === "/" || url.pathname === "/index.html") {
-      const auth = await authorize(request, env);
-      if (auth instanceof Response) return auth;
-      return env.ASSETS.fetch(request);
-    }
-
-    if (url.pathname.startsWith("/assets/") || url.pathname === "/sw.js") {
-      return env.ASSETS.fetch(request);
-    }
-
-    return new Response("Not found", { status: 404 });
-  },
-
-  async email(message: ForwardableEmailMessage, env: Env) {
-    await routeAgentEmail(message, env, {
-      resolver: async (email, env) => {
-        if (env.EMAIL_SIGNING_SECRET) {
-          const secureResolver = createSecureReplyEmailResolver<Env>(
-            env.EMAIL_SIGNING_SECRET,
-            {
-              onInvalidSignature: (rejected, reason) => {
-                console.warn(
-                  `[holston] Email reply signature rejected from ${rejected.from}: ${reason}`,
-                );
-              },
-            },
-          );
-          const replyRouting = await secureResolver(email, env);
-          if (replyRouting) return replyRouting;
-        }
-        const from = email.from.trim().toLowerCase();
-        if (!allowedEmailSenders(env).has(from)) return null;
-        return { agentName: AGENT_CLASS, agentId: agentNameFromEmail(from) };
-      },
-      onNoRoute: (email) => {
-        console.warn(
-          `[holston] Rejecting email from unauthorized sender: ${email.from}`,
-        );
-        email.setReject("Sender not authorized");
-      },
-    });
-  },
+  fetch: handleFetch,
+  email: handleEmail,
 } satisfies ExportedHandler<Env>;
-
-async function setupTelegramWebhook(
-  request: Request,
-  env: Env,
-): Promise<Response> {
-  if (!env.TELEGRAM_BOT_TOKEN) {
-    return Response.json({ error: "TELEGRAM_BOT_TOKEN not set" }, { status: 400 });
-  }
-  const url = new URL(request.url);
-  const webhookUrl = `${url.origin}/messengers/telegram/webhook`;
-  const response = await fetch(
-    `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/setWebhook`,
-    {
-      body: JSON.stringify({
-        allowed_updates: ["message", "callback_query"],
-        drop_pending_updates: true,
-        secret_token: env.TELEGRAM_WEBHOOK_SECRET_TOKEN,
-        url: webhookUrl,
-      }),
-      headers: { "content-type": "application/json" },
-      method: "POST",
-    },
-  );
-  const result = await response.json();
-  return Response.json(
-    { ok: response.ok, result, webhookUrl },
-    { status: response.ok ? 200 : 502 },
-  );
-}
-
-function stripHtml(html: string | undefined): string | undefined {
-  if (!html) return undefined;
-  return html
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}

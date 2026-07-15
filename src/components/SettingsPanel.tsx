@@ -4,9 +4,13 @@ import { Switch } from "@cloudflare/kumo/components/switch";
 import { Text } from "@cloudflare/kumo/components/text";
 import { Field } from "@cloudflare/kumo/components/field";
 import { Button } from "@cloudflare/kumo/components/button";
+import { Banner } from "@cloudflare/kumo/components/banner";
+import { Meter } from "@cloudflare/kumo/components/meter";
+import { WarningIcon } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
 import type { HolstonAgentConnection } from "../app";
 import { MemoryCard } from "./MemoryCard";
+import { GATED_TOOLS } from "../lib/tools";
 import {
   TIMEZONES,
   WORKERS_AI_MODELS,
@@ -25,6 +29,7 @@ export function SettingsPanel({
   const [instructions, setInstructions] = useState(s.customInstructions);
   const [dirty, setDirty] = useState(false);
   const [savingInstructions, setSavingInstructions] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   // Adopt a server-side change only when the user isn't mid-edit, so an
   // unrelated state sync never clobbers an in-progress draft.
@@ -32,8 +37,20 @@ export function SettingsPanel({
     if (!dirty) setInstructions(s.customInstructions);
   }, [s.customInstructions, dirty]);
 
-  const patch = (p: Parameters<HolstonAgentConnection["stub"]["updateSettings"]>[0]) =>
-    agent.stub.updateSettings(p);
+  // Every settings write surfaces failure — no more silent "did nothing".
+  const patch = async (
+    p: Parameters<HolstonAgentConnection["stub"]["updateSettings"]>[0],
+  ) => {
+    setError(null);
+    try {
+      await agent.stub.updateSettings(p);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save setting");
+    }
+  };
+
+  const usage = state.usage;
+  const overrides = s.toolApprovals ?? {};
 
   return (
     <div className="h-full overflow-y-auto holston-scroll">
@@ -43,6 +60,27 @@ export function SettingsPanel({
           These are stored on your agent and take effect immediately — they drive
           the model, skill behavior, and tool approvals on every turn.
         </Text>
+
+        {error && (
+          <Banner variant="error" icon={<WarningIcon />}>{error}</Banner>
+        )}
+
+        {usage && (
+          <Surface className="p-4 rounded-xl">
+            <div className="flex items-center justify-between">
+              <Text variant="heading3" as="h3">AI usage today</Text>
+              <Text variant="secondary" size="sm">{usage.calls} / {usage.limit} calls</Text>
+            </div>
+            <div className="mt-2">
+              <Meter value={usage.calls} max={usage.limit} label="AI calls today" />
+            </div>
+            {usage.exceeded && (
+              <div className="mt-2">
+                <Text variant="error" size="sm">Daily AI budget reached — resets at midnight UTC.</Text>
+              </div>
+            )}
+          </Surface>
+        )}
 
         <Surface className="p-4 rounded-xl">
           <Field label="Model" description="Workers AI model used for inference. No API keys required.">
@@ -67,7 +105,7 @@ export function SettingsPanel({
             <Switch checked={s.autoSkills} onCheckedChange={(v) => patch({ autoSkills: v })} aria-label="Auto skill proposals" />
           </div>
 
-          <Field label="Tool approval" description="When Holston must ask before running a tool. 'Always' blocks bash/write/edit/delete; 'destructive-only' gates skill writes.">
+          <Field label="Tool approval" description="Baseline policy by risk. 'Always' gates every write/destructive/external tool (bash, code execution, browser, MCP, delete…); 'destructive-only' gates destructive + external; 'never' gates nothing.">
             <Select
               value={s.approvalMode}
               onValueChange={(v) => patch({ approvalMode: v as ApprovalMode })}
@@ -78,6 +116,40 @@ export function SettingsPanel({
               <Select.Option value="never">Never ask</Select.Option>
             </Select>
           </Field>
+
+          <div>
+            <Text>Per-tool overrides</Text>
+            <Text variant="secondary" size="sm">Pin a specific tool to always-ask or never-ask, regardless of the baseline above.</Text>
+            <div className="mt-2 flex flex-col gap-1">
+              {GATED_TOOLS.map((tool) => (
+                <div key={tool.name} className="flex items-center gap-2">
+                  <div className="flex-1 min-w-0">
+                    <Text size="sm" truncate>{tool.label}</Text>
+                  </div>
+                  <div className="w-40">
+                    <Select
+                      value={overrides[tool.name] ?? "default"}
+                      onValueChange={(v) =>
+                        patch({
+                          toolApprovals: {
+                            ...overrides,
+                            ...(v === "default"
+                              ? { [tool.name]: undefined as never }
+                              : { [tool.name]: v as "always" | "never" }),
+                          },
+                        })
+                      }
+                      aria-label={`Approval for ${tool.label}`}
+                    >
+                      <Select.Option value="default">Use baseline</Select.Option>
+                      <Select.Option value="always">Always ask</Select.Option>
+                      <Select.Option value="never">Never ask</Select.Option>
+                    </Select>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
 
           <Field label="Timezone" description="Reminders and recurring schedules resolve in this zone.">
             <Select

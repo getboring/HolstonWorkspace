@@ -16,6 +16,14 @@ import { getToolName, isToolUIPart, type UIMessage } from "ai";
 import { useEffect, useRef, useState } from "react";
 import { Streamdown } from "streamdown";
 
+/** First-run suggestions that exercise Holston's real capabilities. */
+const STARTERS: { title: string; prompt: string }[] = [
+  { title: "Set a reminder", prompt: "Remind me to review the deploy tomorrow at 9am." },
+  { title: "Remember a fact", prompt: "Remember that I prefer concise, Cloudflare-native answers." },
+  { title: "Run some code", prompt: "Use code execution to compute the 20th Fibonacci number." },
+  { title: "Read a web page", prompt: "Summarize what's on https://developers.cloudflare.com/agents/" },
+];
+
 interface ChatViewProps {
   messages: UIMessage[];
   stop: () => void;
@@ -80,12 +88,26 @@ export function ChatView({
       <div className="flex-1 overflow-y-auto holston-scroll px-4 py-6">
         <div className="mx-auto w-full max-w-3xl flex flex-col gap-4">
           {messages.length === 0 && (
-            <div className="pt-16">
+            <div className="pt-12">
               <Empty
                 icon={<ChatCircleIcon size={32} />}
                 title="Ask Holston anything"
                 description="It has workspace tools, MCP servers, skills, reminders, and can reach you by Telegram, email, and push."
               />
+              <div className="mt-6 mx-auto max-w-xl grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {STARTERS.map((s) => (
+                  <button
+                    key={s.prompt}
+                    type="button"
+                    disabled={isLoading}
+                    onClick={() => sendMessage({ text: s.prompt })}
+                    className="text-left rounded-lg border border-kumo-hairline bg-kumo-base p-3 hover:bg-kumo-tint transition-colors disabled:opacity-50"
+                  >
+                    <div className="text-sm font-medium text-kumo-default">{s.title}</div>
+                    <div className="text-xs text-kumo-subtle mt-0.5">{s.prompt}</div>
+                  </button>
+                ))}
+              </div>
             </div>
           )}
 
@@ -192,7 +214,7 @@ function ToolPart({ part }: { part: unknown }) {
   if (state === "output-available") {
     return (
       <ToolBox tone="success" name={name} badge="Done">
-        <Preview value={p.output} />
+        <ToolOutput name={name} value={p.output} />
       </ToolBox>
     );
   }
@@ -201,6 +223,59 @@ function ToolPart({ part }: { part: unknown }) {
       <Loader size={14} />
       <Text variant="mono-secondary">Running {name}…</Text>
     </div>
+  );
+}
+
+/** Find a base64/data-URL image anywhere in a tool result (browser screenshots). */
+function findImage(value: unknown): string | null {
+  if (typeof value === "string") {
+    if (value.startsWith("data:image/")) return value;
+    if (/^[A-Za-z0-9+/]{200,}={0,2}$/.test(value)) return `data:image/png;base64,${value}`;
+    return null;
+  }
+  if (value && typeof value === "object") {
+    for (const v of Object.values(value)) {
+      const found = findImage(v);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+/**
+ * Render a tool result well: screenshots as images, code/exec output in full
+ * (behind a show-more toggle), everything else as pretty JSON.
+ */
+function ToolOutput({ name, value }: { name: string; value: unknown }) {
+  const [expanded, setExpanded] = useState(false);
+
+  // Browser screenshots (or any tool returning an image) render as an image.
+  if (name.startsWith("browser_") || name.includes("screenshot")) {
+    const img = findImage(value);
+    if (img) {
+      return <img src={img} alt="tool result" className="mt-2 max-h-96 rounded border border-kumo-hairline" />;
+    }
+  }
+
+  const text =
+    typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  const LIMIT = 800;
+  const truncated = text.length > LIMIT && !expanded;
+  return (
+    <>
+      <pre className="mt-1 overflow-x-auto whitespace-pre-wrap text-xs text-kumo-subtle holston-scroll">
+        {truncated ? text.slice(0, LIMIT) : text}
+      </pre>
+      {text.length > LIMIT && (
+        <button
+          type="button"
+          className="mt-1 text-xs text-kumo-link underline"
+          onClick={() => setExpanded((e) => !e)}
+        >
+          {expanded ? "Show less" : `Show more (${text.length} chars)`}
+        </button>
+      )}
+    </>
   );
 }
 

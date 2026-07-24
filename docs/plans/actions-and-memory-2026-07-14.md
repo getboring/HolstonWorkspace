@@ -1,5 +1,11 @@
 # Plan: Think Actions (receipts write-path) + Session Memory (2026-07-14)
 
+> **STATUS: HISTORICAL (as of v0.7.0).** Delivered. Live surface is README / AGENTS.md.
+> Leftovers explicitly **dropped**:
+> - `promote_skill` action — approve/reject already exists via HTTP/`@callable` Skills panel; not duplicated as an action.
+> - `soul` context block — identity lives in system prompt + `customInstructions`; no separate session block.
+> Memory UI shipped as **editable** (plan said read-only).
+
 Executes the two deferred audit items against `@cloudflare/think` 0.13.0.
 Researched against the live 2026 docs (actions.md, sessions.md) and the
 installed type surface. Delivered as one reviewed PR → merge → deploy.

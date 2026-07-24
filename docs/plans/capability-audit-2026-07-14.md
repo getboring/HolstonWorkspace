@@ -1,10 +1,33 @@
 # Holston Workspace — Capability Audit & Gap Plan (2026-07-14)
 
+> **STATUS: HISTORICAL (as of v0.7.0).** This gap plan drove the July 2026 buildout.
+> Almost every item below is now shipped — see README / AGENTS.md for the live surface.
+> Remaining deferrals (explicitly not shipping): **P2-9 sub-agents**, **P3-12 skill script runner**.
+> Telegram reminder fan-out (part of P2-10) was deliberately left out of `notifyUser`
+> (push + web broadcast + owner email only; Telegram remains an interactive messenger).
+
 Full audit of the Agents SDK / Think surface vs. what Holston implements, after the
 7-fix hardening PR and the native-buildout PR (both merged + live). Ordered by impact.
 
 ## Legend
 ✅ implemented · ⚠️ implemented but broken/partial · ❌ not implemented
+
+## Post-v0.7.0 disposition
+
+| ID | Item | Disposition |
+|----|------|-------------|
+| P0-1 | `approvalMode` gate | **Shipped** (`tool-policy` + `beforeToolCall`) |
+| P0-2 | Timezone | **Shipped** |
+| P1-3 | Outbound email / notify | **Shipped** (email; Telegram not in `notifyUser`) |
+| P1-4 | `getActions` + receipts | **Shipped** |
+| P1-5 | `fetchTools` | **Shipped** |
+| P1-6 | `configureSession` | **Shipped** (no `soul` block — dropped; identity lives in system prompt + `customInstructions`) |
+| P2-7 | `contextOverflow` | **Shipped** |
+| P2-8 | Stall timeout | **Shipped** (`120_000` ms) |
+| P2-9 | Sub-agents | **Deferred / won't ship** unless product needs parallel task fan-out |
+| P2-10 | Notify fan-out | **Shipped** (push + broadcast + email; Telegram chat is separate) |
+| P3-11 | Stale skill docs | **Shipped** |
+| P3-12 | Skill script runner | **Deferred / won't ship** — skills stay instruction-only |
 
 ## What we have (✅)
 - `Think<Env, HolstonState>` with `initialState` + `validateStateChange` (client state rejected)

@@ -15,7 +15,7 @@
 - **Self-improving skills** (LLM curator proposes skills after complex turns → staged for your approval → vector retrieval; success/fail counters now update from real turn outcomes so ranking learns, and you can author/edit/delete skills directly in the UI)
 - **Client-managed MCP** (add/remove/authenticate MCP servers from the UI, live tool counts and OAuth handoff — no more single hardcoded env var)
 - **Holston as an MCP server** (publishes its own capabilities as tools at a bearer-gated `/mcp` — reminders, memory, history search, receipts, health — so Claude, a CLI, or another agent can drive the owner's Holston over MCP; the tools operate on the owner's real agent instance, not a stub)
-- **Reminders & recurring tasks** (natural-language scheduling in your timezone: "every weekday at 9am"; fires across push, Telegram, email, and the chat; DST drift self-corrects on wake)
+- **Reminders & recurring tasks** (natural-language scheduling in your timezone: "every weekday at 9am"; fires across push, owner email, and the open chat; DST drift self-corrects on wake. Telegram is an interactive messenger channel, not part of reminder fan-out)
 - **Web Push** (VAPID; reach the user with reminders and proactive messages even when the tab is closed)
 - **Actions with receipts** (gated server actions — send_message, set_reminder, save_memory, remove_skill — following the Boring Stack write-path: validate → idempotency → authorize → execute → immutable receipt; the Receipts tab paginates the ledger and exports it as NDJSON)
 - **Unified tool-approval policy** (one risk registry classifies every tool — read / write / destructive / external — so `beforeToolCall`, action gates, and the Settings UI all agree; a baseline mode _plus_ per-tool always/never overrides, so code execution, browser, and MCP tools are gated in "always" mode instead of silently bypassing it)
@@ -57,7 +57,6 @@ src/lib/bearer.ts      Pure bearer-token gate for the /mcp endpoint (unit-tested
 src/usage.ts           UsageMeter — per-DO daily AI-call budget in SQLite
 src/observability.ts   diagnostics_channel subscriptions (schedule / chat / fiber / mcp) → event sink (persist + notify on critical)
 src/shared/state.ts    HolstonState contract shared by server + client
-src/core/result.ts     Result<T> / ok / fail / statusFor (never-throw convention)
 src/core/tool-policy.ts  Unified tool risk registry + shouldApprove (single source of truth for gating)
 src/core/circuit-breaker.ts  withCircuitBreaker / withTimeout for external calls
 src/core/csrf.ts       assertSameOrigin (CSRF guard for browser mutations)
@@ -75,7 +74,7 @@ src/components/        ChatView, TasksPanel, McpPanel, SkillsPanel, LabPanel (sn
                        ToolApproval, SessionList (all Kumo)
 public/sw.js           Push service worker
 skills/                Bundled SKILL.md files (agents:skills)
-docs/plans/            Capability audit + build plans
+docs/plans/            Historical capability audit + build plans (stamped; see STATUS headers)
 ```
 
 ## @callable RPC (client ↔ agent over WebSocket)
